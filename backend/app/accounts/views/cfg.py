@@ -8,6 +8,8 @@ from app.utils import req_gateway
 
 
 class VersionConfig(APIView):
+    authentication_classes = ()
+    permission_classes = ()
 
     def get(self, request):
         return Response({

@@ -103,6 +103,16 @@ class SecurityRegressionTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
 
+    def test_invalid_auth_cookie_does_not_block_public_version_config(self):
+        client = APIClient()
+        client.cookies[AUTH_COOKIE_NAME] = "invalid-token"
+
+        response = client.get("/0x/user/version-cfg")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("allow_register", response.data)
+        self.assertIn("billing_enabled", response.data)
+
     @override_settings(CSRF_TRUSTED_ORIGINS=["https://mirror.example"])
     @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
     def test_admin_login_issues_csrf_cookie_for_unsafe_api_requests(self):
