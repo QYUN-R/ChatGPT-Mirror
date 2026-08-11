@@ -9,13 +9,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from app.billing.exceptions import BillingError
-from app.billing.models import Order, Plan, PlanOffer, UserNotification
+from app.billing.models import Order, Plan, PlanOffer, SupportContact, UserNotification
 from app.billing.payment import PaymentEvent, get_checkout_provider
 from app.billing.selectors import current_subscription, usage_snapshot
 from app.billing.serializers import (
     NotificationSerializer,
     OrderSerializer,
     PlanSerializer,
+    SupportContactSerializer,
     SubscriptionSerializer,
 )
 from app.billing.services import active_subscription, complete_order, create_order, refresh_subscription_state
@@ -190,3 +191,13 @@ class NotificationReadView(APIView):
             notification.read_at = timezone.now()
             notification.save(update_fields=["read_at"])
         return Response({"message": "已标记为已读"})
+
+
+class SupportContactListView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request):
+        contacts = SupportContact.objects.filter(is_active=True)
+        return Response({
+            "contacts": SupportContactSerializer(contacts, many=True).data,
+        })

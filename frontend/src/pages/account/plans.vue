@@ -4,7 +4,7 @@
       <div class="section-heading">
         <div>
           <h2>套餐配置</h2>
-          <p>管理套餐、月付价格和草稿季度价格</p>
+            <p>管理套餐名称、宣传语、价格和可购买状态</p>
         </div>
         <t-space>
           <t-button variant="outline" @click="openOfferDialog()">新增价格</t-button>
@@ -39,7 +39,7 @@
       <div class="section-heading compact">
         <div>
           <h2>价格方案</h2>
-          <p>金额按人民币分存储，季度套餐默认不可购买</p>
+            <p>价格按人民币录入，可随时调整；是否开放购买由你决定</p>
         </div>
       </div>
       <t-table :data="offers" :columns="offerColumns" row-key="key">

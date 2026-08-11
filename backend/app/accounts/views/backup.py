@@ -23,6 +23,7 @@ from app.billing.models import (
     PlanOffer,
     PoolAccountPolicy,
     PoolReservation,
+    SupportContact,
     Subscription,
     UsageEvent,
     UserNotification,
@@ -42,6 +43,7 @@ BILLING_BACKUP_MODELS = (
     UsageEvent,
     Announcement,
     UserNotification,
+    SupportContact,
     AuditLog,
 )
 

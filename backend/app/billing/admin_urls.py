@@ -6,6 +6,7 @@ from app.billing.admin_views import (
     AdminOrderView,
     AdminPlanView,
     AdminPoolView,
+    AdminSupportContactView,
     AdminSubscriptionView,
 )
 
@@ -16,5 +17,6 @@ urlpatterns = [
     path("subscriptions", AdminSubscriptionView.as_view()),
     path("orders", AdminOrderView.as_view()),
     path("announcements", AdminAnnouncementView.as_view()),
+    path("support-contacts", AdminSupportContactView.as_view()),
     path("audit-logs", AdminAuditLogView.as_view()),
 ]

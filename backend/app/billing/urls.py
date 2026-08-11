@@ -8,6 +8,7 @@ from app.billing.views import (
     OrderMockPayView,
     OrderRenewView,
     PlanListView,
+    SupportContactListView,
 )
 
 
@@ -19,4 +20,5 @@ urlpatterns = [
     path("orders/<int:order_id>/mock-pay", OrderMockPayView.as_view()),
     path("notifications", NotificationListView.as_view()),
     path("notifications/<int:notification_id>/read", NotificationReadView.as_view()),
+    path("support-contacts", SupportContactListView.as_view()),
 ]

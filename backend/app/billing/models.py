@@ -1,3 +1,6 @@
+import base64
+import binascii
+
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -268,10 +271,8 @@ class PoolAccountPolicy(TimestampedModel):
 
     def clean(self):
         errors = {}
-        if self.tier == PoolTier.STANDARD and not 3 <= self.binding_limit <= 8:
-            errors["binding_limit"] = "普通池单账号绑定人数必须在 3 到 8 之间"
-        if self.tier == PoolTier.PREMIUM and self.binding_limit != 3:
-            errors["binding_limit"] = "高级池单账号绑定人数固定为 3"
+        if self.binding_limit < 1:
+            errors["binding_limit"] = "单账号绑定上限必须至少为 1"
         if self.account_id and "plus" not in (self.account.plan_type or "").lower():
             errors["account"] = "商业号池只允许加入 Plus 账号"
         if self.pool_id and self.tier:
@@ -287,6 +288,73 @@ class PoolAccountPolicy(TimestampedModel):
     def save(self, *args, **kwargs):
         self.full_clean()
         return super().save(*args, **kwargs)
+
+
+class SupportContact(TimestampedModel):
+    """Administrator-managed after-sales contact details shown to signed-in users."""
+
+    QR_IMAGE_MAX_BYTES = 512 * 1024
+    QR_IMAGE_PREFIXES = {
+        "image/png": b"\x89PNG\r\n\x1a\n",
+        "image/jpeg": b"\xff\xd8\xff",
+        "image/webp": b"RIFF",
+    }
+
+    name = models.CharField(max_length=64)
+    channel = models.CharField(max_length=32)
+    contact = models.CharField(max_length=240)
+    description = models.CharField(max_length=240, blank=True)
+    qr_image = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ("sort_order", "id")
+
+    def clean(self):
+        self.name = self.name.strip()
+        self.channel = self.channel.strip()
+        self.contact = self.contact.strip()
+        self.description = self.description.strip()
+        self.qr_image = self.qr_image.strip()
+
+        errors = {}
+        if not self.name:
+            errors["name"] = "联系人名称不能为空"
+        if not self.channel:
+            errors["channel"] = "联系方式类型不能为空"
+        if not self.contact:
+            errors["contact"] = "联系方式不能为空"
+        if self.qr_image:
+            try:
+                header, encoded = self.qr_image.split(",", 1)
+                expected_prefix = "data:"
+                if not header.startswith(expected_prefix) or not header.endswith(";base64"):
+                    raise ValueError
+                mime_type = header[len(expected_prefix):-len(";base64")]
+                expected_magic = self.QR_IMAGE_PREFIXES.get(mime_type)
+                if not expected_magic:
+                    raise ValueError
+                if len(encoded) > self.QR_IMAGE_MAX_BYTES * 2:
+                    raise ValueError
+                raw = base64.b64decode(encoded, validate=True)
+                if len(raw) > self.QR_IMAGE_MAX_BYTES:
+                    errors["qr_image"] = "二维码图片不能超过 512 KB"
+                elif not raw.startswith(expected_magic):
+                    errors["qr_image"] = "二维码图片格式与文件内容不匹配"
+                elif mime_type == "image/webp" and raw[8:12] != b"WEBP":
+                    errors["qr_image"] = "二维码图片格式与文件内容不匹配"
+            except (ValueError, binascii.Error):
+                errors["qr_image"] = "二维码仅支持 PNG、JPEG 或 WebP 图片"
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.name} - {self.channel}"
 
 
 class PoolReservation(TimestampedModel):

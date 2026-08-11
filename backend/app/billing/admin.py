@@ -11,6 +11,7 @@ from app.billing.models import (
     PlanOffer,
     PoolAccountPolicy,
     PoolReservation,
+    SupportContact,
     Subscription,
     UsageEvent,
     UserNotification,
@@ -31,5 +32,6 @@ for model in (
     Announcement,
     UserNotification,
     AuditLog,
+    SupportContact,
 ):
     admin.site.register(model)

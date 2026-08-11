@@ -23,6 +23,7 @@ from app.billing.models import (
     PlanOffer,
     PoolAccountPolicy,
     PoolTier,
+    SupportContact,
     SubscriptionStatus,
     UserNotification,
 )
@@ -66,14 +67,14 @@ class BillingServiceTests(TestCase):
         self.standard_plan = Plan.objects.create(
             code="standard-plus",
             name="普通套餐",
-            tagline="5-8 人共享号池",
+            tagline="稳定的 Plus 号池服务",
             pool=self.standard_pool,
             pool_tier=PoolTier.STANDARD,
         )
         self.premium_plan = Plan.objects.create(
             code="premium-plus",
             name="高级套餐",
-            tagline="1-3 人号池",
+            tagline="高优先级 Plus 号池服务",
             pool=self.premium_pool,
             pool_tier=PoolTier.PREMIUM,
         )
@@ -150,24 +151,31 @@ class BillingServiceTests(TestCase):
         order, subscription = complete_order(order, self.payment_event(order))
         return order, subscription
 
-    def test_standard_and_premium_binding_limits_are_enforced(self):
-        policy = PoolAccountPolicy(
+    def test_binding_limits_are_independently_configurable_for_each_tier(self):
+        standard = PoolAccountPolicy(
             pool=self.standard_pool,
-            account=self.create_account("invalid-standard@example.com"),
+            account=self.create_account("standard-configurable@example.com"),
             tier=PoolTier.STANDARD,
-            binding_limit=9,
+            binding_limit=12,
         )
-        with self.assertRaises(DjangoValidationError):
-            policy.full_clean()
+        standard.full_clean()
 
         premium = PoolAccountPolicy(
             pool=self.premium_pool,
-            account=self.create_account("invalid-premium@example.com"),
+            account=self.create_account("premium-configurable@example.com"),
             tier=PoolTier.PREMIUM,
-            binding_limit=4,
+            binding_limit=7,
+        )
+        premium.full_clean()
+
+        invalid = PoolAccountPolicy(
+            pool=self.standard_pool,
+            account=self.create_account("invalid-limit@example.com"),
+            tier=PoolTier.STANDARD,
+            binding_limit=0,
         )
         with self.assertRaises(DjangoValidationError):
-            premium.full_clean()
+            invalid.full_clean()
 
     def test_standard_and_premium_tiers_cannot_share_one_pool(self):
         conflicting_plan = Plan(
@@ -224,7 +232,7 @@ class BillingServiceTests(TestCase):
         self.assertNotEqual(migrated.account_id, self.premium_account.id)
         self.assertTrue(AccountAssignmentEvent.objects.filter(event_type="MIGRATED").exists())
 
-    def test_premium_pool_stops_at_three_reserved_users(self):
+    def test_premium_pool_stops_at_its_configured_capacity(self):
         users = [
             User.objects.create_user(username=f"premium-{index}", password="Strong-password-123!")
             for index in range(4)
@@ -459,7 +467,7 @@ class BillingApiTests(TestCase):
         self.plan = Plan.objects.create(
             code="api-standard",
             name="普通套餐",
-            tagline="5-8 人共享 Plus 号池",
+            tagline="稳定的 Plus 号池服务",
             pool=self.pool,
             pool_tier=PoolTier.STANDARD,
         )
@@ -517,6 +525,85 @@ class BillingApiTests(TestCase):
         plans = self.client.get("/0x/billing/plans")
         self.assertFalse(plans.data["checkout_available"])
 
+    def test_user_plan_payload_hides_capacity_but_keeps_purchase_availability(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.get("/0x/billing/plans")
+        self.assertEqual(response.status_code, 200)
+        plan = response.data["plans"][0]
+        self.assertNotIn("capacity", plan)
+        self.assertTrue(plan["purchase_available"])
+
+        self.client.force_authenticate(self.admin)
+        admin_response = self.client.get("/0x/admin/plans")
+        self.assertEqual(admin_response.status_code, 200)
+        self.assertIn("capacity", admin_response.data["plans"][0])
+
+    def test_support_contacts_are_admin_managed_and_user_visible(self):
+        png_data_uri = (
+            "data:image/png;base64,"
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9gqS8AAAAASUVORK5CYII="
+        )
+        self.client.force_authenticate(self.admin)
+        created = self.client.post(
+            "/0x/admin/support-contacts",
+            {
+                "action": "save",
+                "name": "售后客服",
+                "channel": "微信",
+                "contact": "service-wechat",
+                "description": "工作日回复",
+                "qr_image": png_data_uri,
+                "is_active": True,
+                "sort_order": 10,
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 200)
+        contact_id = created.data["contact"]["id"]
+
+        self.client.force_authenticate(self.user)
+        visible = self.client.get("/0x/billing/support-contacts")
+        self.assertEqual(visible.status_code, 200)
+        self.assertEqual(visible.data["contacts"][0]["id"], contact_id)
+        self.assertEqual(visible.data["contacts"][0]["qr_image"], png_data_uri)
+
+        self.client.force_authenticate(self.admin)
+        hidden = self.client.post(
+            "/0x/admin/support-contacts",
+            {
+                "action": "save",
+                "id": contact_id,
+                "name": "售后客服",
+                "channel": "微信",
+                "contact": "service-wechat",
+                "description": "工作日回复",
+                "qr_image": png_data_uri,
+                "is_active": False,
+                "sort_order": 10,
+            },
+            format="json",
+        )
+        self.assertEqual(hidden.status_code, 200)
+
+        self.client.force_authenticate(self.user)
+        self.assertEqual(self.client.get("/0x/billing/support-contacts").data["contacts"], [])
+
+    def test_support_contact_rejects_svg_qr_upload(self):
+        self.client.force_authenticate(self.admin)
+        response = self.client.post(
+            "/0x/admin/support-contacts",
+            {
+                "action": "save",
+                "name": "售后客服",
+                "channel": "微信",
+                "contact": "service-wechat",
+                "qr_image": "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(SupportContact.objects.exists())
+
     def test_admin_manual_grant_and_user_list_show_plan(self):
         self.client.force_authenticate(self.admin)
         response = self.client.post(
@@ -571,4 +658,5 @@ class BillingApiTests(TestCase):
         payload = json.loads(decrypt_value(response.data["archive"]))
         self.assertEqual(payload["version"], 2)
         self.assertIn("billing.Order", payload["billing"])
+        self.assertIn("billing.SupportContact", payload["billing"])
         self.assertNotIn("secret-upstream-token", response.data["archive"])

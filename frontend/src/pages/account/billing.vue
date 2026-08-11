@@ -7,10 +7,16 @@
             <h2>当前订阅</h2>
             <p>套餐权益、有效期和使用情况</p>
           </div>
-          <t-button variant="outline" @click="loadData">
-            <template #icon><t-icon name="refresh" /></template>
-            刷新
-          </t-button>
+          <t-space>
+            <t-button variant="outline" @click="goSupport">
+              <template #icon><t-icon name="service" /></template>
+              售后支持
+            </t-button>
+            <t-button variant="outline" @click="loadData">
+              <template #icon><t-icon name="refresh" /></template>
+              刷新
+            </t-button>
+          </t-space>
         </div>
         <div v-if="me?.subscription" class="subscription-grid">
           <div class="subscription-item">
@@ -43,7 +49,7 @@
         <div v-else class="empty-subscription">
           <div>
             <strong>尚未开通套餐</strong>
-            <span>选择下方套餐后即可建立固定 Plus 账号绑定。</span>
+            <span>选择下方套餐后即可提交开通申请。</span>
           </div>
         </div>
         <t-alert
@@ -57,7 +63,7 @@
         <div class="section-heading">
           <div>
             <h2>选择套餐</h2>
-            <p>季度套餐保留在后台，定价完成前不可购买</p>
+            <p>套餐价格和可购买状态由管理员配置</p>
           </div>
           <t-radio-group v-model="period" variant="default-filled" size="small">
             <t-radio-button value="monthly">月付</t-radio-button>
@@ -76,29 +82,16 @@
                 <span>/ 月</span>
               </div>
             </div>
-            <dl class="plan-facts">
-              <div>
-                <dt>号池类型</dt>
-                <dd>{{ plan.pool_tier === 'PREMIUM' ? '高级 Plus 池' : '普通 Plus 池' }}</dd>
-              </div>
-              <div>
-                <dt>可用席位</dt>
-                <dd>{{ plan.capacity.available }} / {{ plan.capacity.total }}</dd>
-              </div>
-              <div>
-                <dt>账号绑定</dt>
-                <dd>{{ plan.pool_tier === 'PREMIUM' ? '每账号最多 3 人' : '每账号 3-8 人' }}</dd>
-              </div>
-            </dl>
             <div class="plan-actions">
               <t-tag v-if="!checkoutAvailable" theme="warning" variant="light">支付筹备中</t-tag>
               <t-tag v-else-if="isCurrent(plan)" theme="success" variant="light">当前使用中</t-tag>
+              <t-tag v-else-if="!plan.purchase_available" theme="default" variant="light">暂不可开通</t-tag>
               <span v-else></span>
               <t-button
                 :theme="plan.pool_tier === 'PREMIUM' ? 'primary' : 'default'"
                 :variant="plan.pool_tier === 'PREMIUM' ? 'base' : 'outline'"
                 :loading="submittingPlanId === plan.id"
-                :disabled="!checkoutAvailable || !monthlyOffer(plan) || (!isCurrent(plan) && plan.capacity.is_full)"
+                :disabled="!checkoutAvailable || !monthlyOffer(plan) || (!isCurrent(plan) && !plan.purchase_available)"
                 @click="submitPlan(plan)"
               >
                 {{ actionLabel(plan) }}
@@ -146,11 +139,13 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import request from '@/api/request'
 import { formatDateTime, formatMoney, remainingDays, statusLabel, statusTheme } from '@/utils/billing'
 
 const loading = ref(false)
+const router = useRouter()
 const me = ref<any>(null)
 const plans = ref<any[]>([])
 const orders = ref<any[]>([])
@@ -173,6 +168,7 @@ const isCurrent = (plan: any) => me.value?.subscription?.plan?.id === plan.id
 
 const actionLabel = (plan: any) => {
   if (!checkoutAvailable.value) return '暂未开放购买'
+  if (!isCurrent(plan) && !plan.purchase_available) return '暂不可开通'
   const current = me.value?.subscription?.plan
   if (!current) return '立即开通'
   if (current.id === plan.id) return '续费'
@@ -196,7 +192,7 @@ const loadData = async () => {
 }
 
 const submitPlan = async (plan: any) => {
-  if (!checkoutAvailable.value) return
+  if (!checkoutAvailable.value || !plan.purchase_available) return
   const offer = monthlyOffer(plan)
   if (!offer) return
   submittingPlanId.value = plan.id
@@ -210,6 +206,8 @@ const submitPlan = async (plan: any) => {
   MessagePlugin.success(data.order.status === 'PAID' ? '套餐已生效' : '订单已创建，等待管理员确认')
   await loadData()
 }
+
+const goSupport = () => router.push({ name: 'SupportCenter' })
 
 onMounted(loadData)
 </script>
@@ -234,7 +232,7 @@ onMounted(loadData)
 .empty-subscription span { margin-top: 6px; color: var(--app-text-muted); font-size: 13px; }
 .subscription-panel :deep(.t-alert) { margin-top: 14px; }
 .plan-grid { display: grid; min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.plan-panel { display: grid; min-width: 0; min-height: 290px; padding: 22px; border: 1px solid var(--app-border-strong); border-radius: 8px; }
+.plan-panel { display: grid; min-width: 0; min-height: 210px; padding: 22px; border: 1px solid var(--app-border-strong); border-radius: 8px; }
 .plan-panel.current { border-color: #91b7a0; box-shadow: inset 0 3px 0 #4f8061; }
 .plan-topline { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .plan-topline h3 { font-size: 20px; font-weight: 600; letter-spacing: 0; }
@@ -242,12 +240,6 @@ onMounted(loadData)
 .plan-price { display: flex; align-items: baseline; white-space: nowrap; }
 .plan-price strong { font-size: 29px; font-weight: 600; }
 .plan-price span { margin-left: 5px; color: var(--app-text-muted); font-size: 13px; }
-.plan-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-self: center; margin: 22px 0; padding: 16px 0; border-top: 1px solid #ecece8; border-bottom: 1px solid #ecece8; }
-.plan-facts div { padding: 0 14px; border-right: 1px solid #ecece8; }
-.plan-facts div:first-child { padding-left: 0; }
-.plan-facts div:last-child { padding-right: 0; border-right: 0; }
-.plan-facts dt { color: var(--app-text-muted); font-size: 12px; }
-.plan-facts dd { margin-top: 8px; font-size: 14px; font-weight: 500; }
 .plan-actions { display: flex; align-items: center; justify-content: space-between; align-self: end; }
 .orders-table { min-width: 0; overflow-x: auto; }
 .order-card-list { display: none; }
@@ -261,8 +253,6 @@ onMounted(loadData)
   .subscription-item:nth-child(2n) { border-right: 0; }
   .subscription-item:nth-last-child(-n+2) { border-bottom: 0; }
   .plan-topline { flex-direction: column; }
-  .plan-facts { grid-template-columns: 1fr; gap: 12px; }
-  .plan-facts div { padding: 0; border: 0; }
   .orders-table { display: none; }
   .order-card-list { display: grid; gap: 10px; }
   .order-card { display: grid; gap: 9px; padding: 14px; background: #f6f6f3; border: 1px solid #e7e7e3; border-radius: 7px; }

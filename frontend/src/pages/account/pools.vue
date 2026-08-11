@@ -20,7 +20,7 @@
       <div class="section-heading">
         <div>
           <h2>账号策略</h2>
-          <p>账号只能加入一个商业号池，高级池人数固定为 3</p>
+          <p>账号只能加入一个商业号池，每个账号的绑定上限由管理员独立设置</p>
         </div>
         <t-button theme="primary" @click="openDialog()">
           <template #icon><t-icon name="add" /></template>
@@ -74,13 +74,13 @@
           </t-select>
         </t-form-item>
         <t-form-item label="套餐等级">
-          <t-radio-group v-model="form.tier" @change="handleTierChange">
+          <t-radio-group v-model="form.tier">
             <t-radio value="STANDARD">普通</t-radio>
             <t-radio value="PREMIUM">高级</t-radio>
           </t-radio-group>
         </t-form-item>
         <t-form-item label="绑定上限">
-          <t-input-number v-model="form.binding_limit" :min="3" :max="form.tier === 'PREMIUM' ? 3 : 8" :disabled="form.tier === 'PREMIUM'" />
+          <t-input-number v-model="form.binding_limit" :min="1" />
         </t-form-item>
         <t-form-item label="健康状态">
           <t-select v-model="form.health_status">
@@ -146,10 +146,6 @@ const openDialog = (row?: any) => {
     tier: 'STANDARD', binding_limit: 5, enabled: true, health_status: 'HEALTHY'
   })
   dialogVisible.value = true
-}
-
-const handleTierChange = (value: string) => {
-  if (value === 'PREMIUM') form.binding_limit = 3
 }
 
 const savePolicy = async () => {

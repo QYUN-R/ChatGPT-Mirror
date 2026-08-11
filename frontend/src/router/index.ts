@@ -96,6 +96,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '公告', requiresAdmin: true }
       },
       {
+        path: 'support-contacts',
+        name: 'SupportContactsAdmin',
+        component: () => import('@/pages/account/support-contacts.vue'),
+        meta: { title: '售后支持', requiresAdmin: true }
+      },
+      {
         path: 'audit',
         name: 'AuditLogs',
         component: () => import('@/pages/account/audit.vue'),
@@ -142,6 +148,12 @@ const routes: RouteRecordRaw[] = [
         name: 'Notifications',
         component: () => import('@/pages/account/notifications.vue'),
         meta: { title: '通知' }
+      },
+      {
+        path: 'support',
+        name: 'SupportCenter',
+        component: () => import('@/pages/account/support.vue'),
+        meta: { title: '售后支持' }
       }
     ]
   }

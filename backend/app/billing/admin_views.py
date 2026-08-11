@@ -17,6 +17,7 @@ from app.billing.models import (
     Plan,
     PlanOffer,
     PoolAccountPolicy,
+    SupportContact,
     Subscription,
 )
 from app.billing.payment import PaymentEvent
@@ -26,6 +27,7 @@ from app.billing.serializers import (
     OrderSerializer,
     PlanSerializer,
     PoolPolicySerializer,
+    SupportContactSerializer,
     SubscriptionSerializer,
 )
 from app.billing.services import (
@@ -283,6 +285,52 @@ class AdminAnnouncementView(APIView):
             announcement.is_published = False
             announcement.save(update_fields=["is_published", "updated_at"])
             return Response({"message": "已撤回公告"})
+        raise ValidationError({"message": "未知操作"})
+
+
+class AdminSupportContactView(APIView):
+    permission_classes = (IsAuthenticated, IsAdminUser)
+
+    def get(self, request):
+        contacts = SupportContact.objects.all()
+        return Response({"contacts": SupportContactSerializer(contacts, many=True).data})
+
+    def post(self, request):
+        action = request.data.get("action") or "save"
+        if action == "save":
+            contact = SupportContact.objects.filter(pk=request.data.get("id")).first() or SupportContact()
+            contact.name = str(request.data.get("name") or "")
+            contact.channel = str(request.data.get("channel") or "")
+            contact.contact = str(request.data.get("contact") or "")
+            contact.description = str(request.data.get("description") or "")
+            contact.qr_image = str(request.data.get("qr_image") or "")
+            contact.is_active = bool(request.data.get("is_active", True))
+            try:
+                contact.sort_order = int(request.data.get("sort_order") or 0)
+                contact.save()
+            except (TypeError, ValueError):
+                raise ValidationError({"sort_order": "排序必须是非负整数"})
+            except DjangoValidationError as exc:
+                raise ValidationError(exc.message_dict)
+            AuditLog.objects.create(
+                actor=request.user,
+                action="support_contact_saved",
+                target_type="SupportContact",
+                target_id=str(contact.id),
+                detail={"name": contact.name, "channel": contact.channel, "is_active": contact.is_active},
+            )
+            return Response({"contact": SupportContactSerializer(contact).data})
+        if action == "delete":
+            contact = get_object_or_404(SupportContact, pk=request.data.get("id"))
+            AuditLog.objects.create(
+                actor=request.user,
+                action="support_contact_deleted",
+                target_type="SupportContact",
+                target_id=str(contact.id),
+                detail={"name": contact.name, "channel": contact.channel},
+            )
+            contact.delete()
+            return Response({"message": "售后联系方式已删除"})
         raise ValidationError({"message": "未知操作"})
 
 

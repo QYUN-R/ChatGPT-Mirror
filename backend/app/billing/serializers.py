@@ -8,6 +8,7 @@ from app.billing.models import (
     Plan,
     PlanOffer,
     PoolAccountPolicy,
+    SupportContact,
     Subscription,
     UserNotification,
 )
@@ -39,6 +40,7 @@ class PlanOfferSerializer(serializers.ModelSerializer):
 class PlanSerializer(serializers.ModelSerializer):
     offers = serializers.SerializerMethodField()
     capacity = serializers.SerializerMethodField()
+    purchase_available = serializers.SerializerMethodField()
     pool_name = serializers.CharField(source="pool.car_name", read_only=True)
 
     class Meta:
@@ -56,8 +58,15 @@ class PlanSerializer(serializers.ModelSerializer):
             "is_archived",
             "sort_order",
             "offers",
+            "purchase_available",
             "capacity",
         )
+
+    def get_fields(self):
+        fields = super().get_fields()
+        if not self.context.get("admin"):
+            fields.pop("capacity", None)
+        return fields
 
     def get_offers(self, obj):
         queryset = obj.offers.all()
@@ -69,6 +78,9 @@ class PlanSerializer(serializers.ModelSerializer):
 
     def get_capacity(self, obj):
         return capacity_snapshot(obj)
+
+    def get_purchase_available(self, obj):
+        return not capacity_snapshot(obj)["is_full"]
 
 
 class SubscriptionSerializer(serializers.ModelSerializer):
@@ -198,6 +210,21 @@ class AnnouncementSerializer(serializers.ModelSerializer):
     class Meta:
         model = Announcement
         fields = "__all__"
+
+
+class SupportContactSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SupportContact
+        fields = (
+            "id",
+            "name",
+            "channel",
+            "contact",
+            "description",
+            "qr_image",
+            "is_active",
+            "sort_order",
+        )
 
 
 class AuditLogSerializer(serializers.ModelSerializer):

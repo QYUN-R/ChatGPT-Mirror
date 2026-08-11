@@ -8,7 +8,7 @@ from app.chatgpt.models import ChatgptCar
 
 
 class Command(BaseCommand):
-    help = "创建普通/高级 Plus 号池以及 58/98 元默认月套餐"
+    help = "创建普通/高级 Plus 号池以及可管理的默认月套餐"
 
     @transaction.atomic
     def handle(self, *args, **options):
@@ -16,7 +16,7 @@ class Command(BaseCommand):
         standard_pool, standard_pool_created = ChatgptCar.objects.get_or_create(
             car_name="Plus 普通号池",
             defaults={
-                "remark": "普通套餐专用，单账号可配置 3-8 人",
+                "remark": "普通套餐专用，单账号绑定上限由管理员设置",
                 "gpt_account_list": [],
                 "created_time": now,
                 "updated_time": now,
@@ -25,7 +25,7 @@ class Command(BaseCommand):
         premium_pool, premium_pool_created = ChatgptCar.objects.get_or_create(
             car_name="Plus 高级号池",
             defaults={
-                "remark": "高级套餐专用，单账号固定最多 3 人",
+                "remark": "高级套餐专用，单账号绑定上限由管理员设置",
                 "gpt_account_list": [],
                 "created_time": now,
                 "updated_time": now,
@@ -35,7 +35,7 @@ class Command(BaseCommand):
             code="standard-plus",
             defaults={
                 "name": "普通套餐",
-                "tagline": "5-8 人共享 Plus 号池",
+                "tagline": "稳定的 Plus 号池服务",
                 "pool": standard_pool,
                 "pool_tier": PoolTier.STANDARD,
                 "sort_order": 10,
@@ -45,7 +45,7 @@ class Command(BaseCommand):
             code="premium-plus",
             defaults={
                 "name": "高级套餐",
-                "tagline": "1-3 人 Plus 号池",
+                "tagline": "高优先级 Plus 号池服务",
                 "pool": premium_pool,
                 "pool_tier": PoolTier.PREMIUM,
                 "sort_order": 20,

@@ -42,6 +42,10 @@
             <template #icon><t-icon name="notification" /></template>
             <span class="menu-label">公告</span>
           </t-menu-item>
+          <t-menu-item v-if="userStore.isAdmin" value="/account/support-contacts">
+            <template #icon><t-icon name="service" /></template>
+            <span class="menu-label">售后支持</span>
+          </t-menu-item>
           <t-menu-item v-if="userStore.isAdmin" value="/account/audit">
             <template #icon><t-icon name="history" /></template>
             <span class="menu-label">审计日志</span>
@@ -69,6 +73,10 @@
           <t-menu-item value="/account/notifications">
             <template #icon><t-icon name="mail" /></template>
             <span class="menu-label">通知</span>
+          </t-menu-item>
+          <t-menu-item value="/account/support">
+            <template #icon><t-icon name="service" /></template>
+            <span class="menu-label">售后支持</span>
           </t-menu-item>
           <t-menu-item value="/account/profile">
             <template #icon><t-icon name="user-circle" /></template>
