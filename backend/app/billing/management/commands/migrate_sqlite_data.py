@@ -86,6 +86,18 @@ class Command(BaseCommand):
                     continue
                 concrete_fields = [field for field in model._meta.concrete_fields]
                 update_fields = [field.name for field in concrete_fields if not field.primary_key]
+                generated_timestamp_fields = [
+                    field.name
+                    for field in concrete_fields
+                    if getattr(field, "auto_now", False) or getattr(field, "auto_now_add", False)
+                ]
+                original_timestamps = {
+                    obj.pk: {
+                        field_name: getattr(obj, field_name)
+                        for field_name in generated_timestamp_fields
+                    }
+                    for obj in source_objects
+                }
                 model.objects.using("default").bulk_create(
                     source_objects,
                     batch_size=batch_size,
@@ -93,12 +105,10 @@ class Command(BaseCommand):
                     update_fields=update_fields,
                     unique_fields=[model._meta.pk.name],
                 )
-                generated_timestamp_fields = [
-                    field.name
-                    for field in concrete_fields
-                    if getattr(field, "auto_now", False) or getattr(field, "auto_now_add", False)
-                ]
                 if generated_timestamp_fields:
+                    for obj in source_objects:
+                        for field_name, value in original_timestamps[obj.pk].items():
+                            setattr(obj, field_name, value)
                     model.objects.using("default").bulk_update(
                         source_objects,
                         fields=generated_timestamp_fields,
