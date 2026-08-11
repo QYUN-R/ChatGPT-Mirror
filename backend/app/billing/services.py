@@ -90,7 +90,7 @@ def payment_callback_lock(order_no):
         lock = client.lock(f"billing:payment:{order_no}", timeout=60, blocking_timeout=5)
         acquired = bool(lock.acquire(blocking=True))
     except redis.RedisError:
-        # PostgreSQL select_for_update 和唯一事件 ID 仍提供最终幂等保护。
+        # PostgreSQL select_for_update 和支付事件/流水唯一约束仍提供最终幂等保护。
         yield
         return
     if not acquired:
@@ -421,25 +421,52 @@ def _apply_paid_order(order):
 def complete_order(order, event: PaymentEvent, *, actor=None):
     rejection = None
     subscription = None
-    with payment_callback_lock(order.order_no):
+    provider_transaction_id = str(event.provider_transaction_id or "").strip()
+    callback_lock_key = f"{order.provider}:{provider_transaction_id or order.order_no}"
+    with payment_callback_lock(callback_lock_key):
         with transaction.atomic():
             order = Order.objects.select_for_update().select_related("user", "plan", "offer").get(pk=order.pk)
             existing_event = PaymentTransaction.objects.filter(event_id=event.event_id).first()
             if existing_event:
                 if existing_event.order_id != order.id:
                     rejection = PaymentRejected("支付流水号已被其他订单使用")
+                elif not existing_event.accepted:
+                    rejection = PaymentRejected("该支付回调此前已被拒绝")
                 else:
                     subscription = Subscription.objects.filter(user=order.user).first()
             else:
+                now = timezone.now()
+                occurred_at = event.occurred_at
+                timestamp_valid = not timezone.is_naive(occurred_at)
+                if timestamp_valid:
+                    max_age = max(int(settings.PAYMENT_CALLBACK_MAX_AGE_SECONDS), 0)
+                    max_future_skew = max(int(settings.PAYMENT_CALLBACK_MAX_FUTURE_SKEW_SECONDS), 0)
+                    timestamp_valid = (
+                        occurred_at >= now - timedelta(seconds=max_age)
+                        and occurred_at <= now + timedelta(seconds=max_future_skew)
+                    )
+                recorded_occurred_at = occurred_at if not timezone.is_naive(occurred_at) else now
+                duplicate_transaction = None
+                if provider_transaction_id:
+                    duplicate_transaction = PaymentTransaction.objects.filter(
+                        provider=order.provider,
+                        provider_transaction_id=provider_transaction_id,
+                    ).first()
+                stored_transaction_id = "" if duplicate_transaction else provider_transaction_id
+                event_type_valid = event.event_type == "PAYMENT_SUCCEEDED"
                 accepted = (
                     event.signature_verified
+                    and event_type_valid
+                    and timestamp_valid
+                    and bool(provider_transaction_id)
+                    and duplicate_transaction is None
                     and event.amount_cents == order.price_cents
                     and event.currency.upper() == order.currency.upper()
                 )
                 PaymentTransaction.objects.create(
                     order=order,
                     provider=order.provider,
-                    provider_transaction_id=event.provider_transaction_id,
+                    provider_transaction_id=stored_transaction_id,
                     event_id=event.event_id,
                     event_type=event.event_type,
                     amount_cents=event.amount_cents,
@@ -447,10 +474,28 @@ def complete_order(order, event: PaymentEvent, *, actor=None):
                     signature_verified=event.signature_verified,
                     accepted=accepted,
                     payload=_sanitize_payment_payload(event.payload),
+                    occurred_at=recorded_occurred_at,
                 )
                 if not event.signature_verified:
                     audit("payment.rejected_signature", order, actor=actor)
                     rejection = PaymentRejected("支付回调验签失败")
+                elif not event_type_valid:
+                    audit("payment.rejected_event_type", order, actor=actor, detail={"event_type": event.event_type})
+                    rejection = PaymentRejected("支付回调事件类型不允许开通套餐")
+                elif not timestamp_valid:
+                    audit("payment.rejected_timestamp", order, actor=actor)
+                    rejection = PaymentRejected("支付回调已过期或时间异常")
+                elif not provider_transaction_id:
+                    audit("payment.rejected_transaction_id", order, actor=actor)
+                    rejection = PaymentRejected("支付渠道流水号不能为空")
+                elif duplicate_transaction:
+                    audit(
+                        "payment.rejected_duplicate_transaction",
+                        order,
+                        actor=actor,
+                        detail={"existing_order_id": duplicate_transaction.order_id},
+                    )
+                    rejection = PaymentRejected("支付渠道流水号已被使用")
                 elif event.amount_cents != order.price_cents or event.currency.upper() != order.currency.upper():
                     audit(
                         "payment.rejected_amount",
@@ -521,7 +566,7 @@ def refund_order(order, *, actor=None, event_id=None):
         defaults={
             "order": order,
             "provider": order.provider,
-            "provider_transaction_id": order.provider_order_id,
+            "provider_transaction_id": f"refund-{order.provider_order_id or order.order_no}",
             "event_type": "REFUND_SUCCEEDED",
             "amount_cents": order.price_cents,
             "currency": order.currency,

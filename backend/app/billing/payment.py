@@ -1,7 +1,10 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
+
+from django.utils import timezone
 
 
 @dataclass(frozen=True)
@@ -12,6 +15,7 @@ class PaymentEvent:
     amount_cents: int
     currency: str
     signature_verified: bool
+    occurred_at: datetime = field(default_factory=timezone.now)
     payload: dict[str, Any] = field(default_factory=dict)
 
 

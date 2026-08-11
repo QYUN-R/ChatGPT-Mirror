@@ -71,7 +71,10 @@ class AdminPlanView(APIView):
             plan.is_active = bool(request.data.get("is_active", True))
             plan.is_public = bool(request.data.get("is_public", True))
             plan.sort_order = int(request.data.get("sort_order") or 0)
-            plan.save()
+            try:
+                plan.save()
+            except DjangoValidationError as exc:
+                raise ValidationError(exc.message_dict)
             return Response({"plan": PlanSerializer(plan, context={"admin": True}).data})
         if action == "save_offer":
             offer = PlanOffer.objects.filter(pk=request.data.get("id")).first() or PlanOffer()

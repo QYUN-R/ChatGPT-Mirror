@@ -88,6 +88,24 @@ class Plan(TimestampedModel):
     class Meta:
         ordering = ("sort_order", "id")
 
+    def clean(self):
+        errors = {}
+        if self.pool_id and self.pool_tier:
+            conflicting_plans = Plan.objects.filter(pool_id=self.pool_id).exclude(pk=self.pk).exclude(
+                pool_tier=self.pool_tier
+            )
+            conflicting_policies = PoolAccountPolicy.objects.filter(pool_id=self.pool_id).exclude(
+                tier=self.pool_tier
+            )
+            if conflicting_plans.exists() or conflicting_policies.exists():
+                errors["pool_tier"] = "同一个商业号池只能属于一个套餐等级"
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
     def __str__(self):
         return self.name
 
@@ -223,6 +241,13 @@ class PaymentTransaction(models.Model):
 
     class Meta:
         ordering = ("-created_at", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("provider", "provider_transaction_id"),
+                condition=~Q(provider_transaction_id=""),
+                name="billing_provider_transaction_uniq",
+            ),
+        ]
 
 
 class PoolAccountPolicy(TimestampedModel):
@@ -249,6 +274,13 @@ class PoolAccountPolicy(TimestampedModel):
             errors["binding_limit"] = "高级池单账号绑定人数固定为 3"
         if self.account_id and "plus" not in (self.account.plan_type or "").lower():
             errors["account"] = "商业号池只允许加入 Plus 账号"
+        if self.pool_id and self.tier:
+            conflicting_policies = PoolAccountPolicy.objects.filter(pool_id=self.pool_id).exclude(
+                pk=self.pk
+            ).exclude(tier=self.tier)
+            conflicting_plans = Plan.objects.filter(pool_id=self.pool_id).exclude(pool_tier=self.tier)
+            if conflicting_policies.exists() or conflicting_plans.exists():
+                errors["tier"] = "普通池和高级池不能共用同一个号池"
         if errors:
             raise ValidationError(errors)
 

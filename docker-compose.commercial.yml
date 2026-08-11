@@ -14,6 +14,8 @@ services:
       BILLING_ENFORCE_SUBSCRIPTION: "${BILLING_ENFORCE_SUBSCRIPTION:-false}"
       BILLING_MOCK_PAYMENTS: "${BILLING_MOCK_PAYMENTS:-false}"
       BILLING_ORDER_HOLD_MINUTES: "${BILLING_ORDER_HOLD_MINUTES:-30}"
+      PAYMENT_CALLBACK_MAX_AGE_SECONDS: "${PAYMENT_CALLBACK_MAX_AGE_SECONDS:-900}"
+      PAYMENT_CALLBACK_MAX_FUTURE_SKEW_SECONDS: "${PAYMENT_CALLBACK_MAX_FUTURE_SKEW_SECONDS:-300}"
       DATABASE_ENGINE: "${DATABASE_ENGINE:-sqlite}"
       SQLITE_PATH: "${SQLITE_PATH:-/app/backend/db/db.sqlite3}"
       POSTGRES_DB: "${POSTGRES_DB:-chatgpt_mirror}"
@@ -124,6 +126,44 @@ services:
       timeout: 3s
       retries: 30
     restart: unless-stopped
+    networks:
+      - chatgpt-network
+
+  db-tools:
+    image: chatgpt-mirror-db-tools:local
+    profiles: ["maintenance"]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.dbtools
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: "${POSTGRES_HOST:-postgres}"
+      POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
+      POSTGRES_DB: "${POSTGRES_DB:-chatgpt_mirror}"
+      POSTGRES_USER: "${POSTGRES_USER:-chatgpt_mirror}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+      POSTGRES_BACKUP_PASSPHRASE: "${POSTGRES_BACKUP_PASSPHRASE:?POSTGRES_BACKUP_PASSPHRASE must be set}"
+      BACKUP_ROOT: "/app/backups/postgres"
+    volumes:
+      - ./backups/postgres:/app/backups/postgres
+    networks:
+      - chatgpt-network
+
+  restore-test-postgres:
+    image: postgres:16-alpine
+    profiles: ["restore-test"]
+    environment:
+      POSTGRES_DB: "postgres"
+      POSTGRES_USER: "${POSTGRES_USER:-chatgpt_mirror}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-chatgpt_mirror} -d postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
     networks:
       - chatgpt-network
 

@@ -17,12 +17,15 @@ Including another URLconf
 
 from django.contrib import admin
 from django.urls import path, include
+from app.billing.views import NotificationListView, NotificationReadView
 from app.settings import DEBUG
 
 urlpatterns = [
     path("0x/user/", include("app.accounts.urls")),
     path("0x/chatgpt/", include("app.chatgpt.urls")),
     path("0x/billing/", include("app.billing.urls")),
+    path("0x/notifications", NotificationListView.as_view()),
+    path("0x/notifications/<int:notification_id>/read", NotificationReadView.as_view()),
     path("0x/admin/", include("app.billing.admin_urls")),
 ]
 

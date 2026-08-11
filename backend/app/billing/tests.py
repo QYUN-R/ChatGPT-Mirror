@@ -21,6 +21,7 @@ from app.billing.models import (
     PoolAccountPolicy,
     PoolTier,
     SubscriptionStatus,
+    UserNotification,
 )
 from app.billing.payment import PaymentEvent
 from app.billing.services import (
@@ -28,9 +29,12 @@ from app.billing.services import (
     complete_order,
     create_order,
     ensure_assignment,
+    refresh_subscription_state,
+    refund_order,
     resolve_managed_account,
 )
 from app.chatgpt.models import ChatgptAccount, ChatgptCar
+from app.chatgpt.views.chatgpt import ChatGPTLoginView
 from app.fields import decrypt_value
 import json
 
@@ -116,14 +120,24 @@ class BillingServiceTests(TestCase):
         )
 
     @staticmethod
-    def payment_event(order, *, event_id=None, amount_cents=None, verified=True):
+    def payment_event(
+        order,
+        *,
+        event_id=None,
+        amount_cents=None,
+        verified=True,
+        event_type="PAYMENT_SUCCEEDED",
+        provider_transaction_id=None,
+        occurred_at=None,
+    ):
         return PaymentEvent(
             event_id=event_id or f"event-{uuid4().hex}",
-            event_type="PAYMENT_SUCCEEDED",
-            provider_transaction_id=f"tx-{uuid4().hex}",
+            event_type=event_type,
+            provider_transaction_id=provider_transaction_id or f"tx-{uuid4().hex}",
             amount_cents=order.price_cents if amount_cents is None else amount_cents,
             currency=order.currency,
             signature_verified=verified,
+            occurred_at=occurred_at or timezone.now(),
             payload={"test": True},
         )
 
@@ -151,6 +165,25 @@ class BillingServiceTests(TestCase):
         )
         with self.assertRaises(DjangoValidationError):
             premium.full_clean()
+
+    def test_standard_and_premium_tiers_cannot_share_one_pool(self):
+        conflicting_plan = Plan(
+            code="invalid-shared-pool",
+            name="错误高级套餐",
+            pool=self.standard_pool,
+            pool_tier=PoolTier.PREMIUM,
+        )
+        with self.assertRaises(DjangoValidationError):
+            conflicting_plan.save()
+
+        conflicting_policy = PoolAccountPolicy(
+            pool=self.standard_pool,
+            account=self.create_account("invalid-shared-policy@example.com"),
+            tier=PoolTier.PREMIUM,
+            binding_limit=3,
+        )
+        with self.assertRaises(DjangoValidationError):
+            conflicting_policy.save()
 
     def test_quarterly_draft_offer_cannot_be_purchased(self):
         draft = PlanOffer.objects.create(
@@ -198,6 +231,13 @@ class BillingServiceTests(TestCase):
         with self.assertRaises(CapacityUnavailable):
             create_order(users[3], self.premium_offer)
 
+    def test_standard_pool_stops_at_configured_capacity(self):
+        users = [User.objects.create(username=f"standard-capacity-{index}") for index in range(11)]
+        for user in users[:10]:
+            self.purchase(user=user, offer=self.standard_offer)
+        with self.assertRaises(CapacityUnavailable):
+            create_order(users[10], self.standard_offer)
+
     def test_renewal_extends_from_existing_expiry(self):
         _, subscription = self.purchase()
         original_end = subscription.ends_at
@@ -214,6 +254,22 @@ class BillingServiceTests(TestCase):
         self.assertEqual(upgraded.ends_at, add_months(original_end, 1))
         assignment = ensure_assignment(upgraded)
         self.assertEqual(assignment.account_id, self.premium_account.id)
+
+    def test_downgrade_stays_premium_until_current_period_ends(self):
+        _, subscription = self.purchase(offer=self.premium_offer)
+        premium_assignment = ensure_assignment(subscription)
+        downgrade = create_order(self.user, self.standard_offer, provider="mock")
+        _, scheduled = complete_order(downgrade, self.payment_event(downgrade))
+        self.assertEqual(scheduled.plan_id, self.premium_plan.id)
+        self.assertEqual(scheduled.scheduled_plan_id, self.standard_plan.id)
+        self.assertEqual(ensure_assignment(scheduled).account_id, premium_assignment.account_id)
+
+        scheduled.ends_at = timezone.now() - timedelta(minutes=1)
+        scheduled.save(update_fields=["ends_at", "updated_at"])
+        applied = refresh_subscription_state(self.user)
+        self.assertEqual(applied.plan_id, self.standard_plan.id)
+        self.assertIsNone(applied.scheduled_plan_id)
+        self.assertEqual(ensure_assignment(applied).pool_id, self.standard_pool.id)
 
     def test_duplicate_callback_does_not_add_time_twice(self):
         order = create_order(self.user, self.standard_offer, provider="mock")
@@ -232,6 +288,57 @@ class BillingServiceTests(TestCase):
         self.assertEqual(order.status, OrderStatus.PENDING)
         transaction = PaymentTransaction.objects.get(order=order)
         self.assertFalse(transaction.accepted)
+
+    def test_forged_signature_does_not_activate_subscription(self):
+        order = create_order(self.user, self.standard_offer, provider="mock")
+        with self.assertRaises(PaymentRejected):
+            complete_order(order, self.payment_event(order, verified=False))
+        order.refresh_from_db()
+        self.assertEqual(order.status, OrderStatus.PENDING)
+        self.assertFalse(PaymentTransaction.objects.get(order=order).accepted)
+
+    def test_expired_callback_does_not_activate_subscription(self):
+        order = create_order(self.user, self.standard_offer, provider="mock")
+        with self.assertRaises(PaymentRejected):
+            complete_order(
+                order,
+                self.payment_event(order, occurred_at=timezone.now() - timedelta(minutes=16)),
+            )
+        order.refresh_from_db()
+        self.assertEqual(order.status, OrderStatus.PENDING)
+
+    def test_non_success_event_does_not_activate_subscription(self):
+        order = create_order(self.user, self.standard_offer, provider="mock")
+        with self.assertRaises(PaymentRejected):
+            complete_order(order, self.payment_event(order, event_type="PAYMENT_CLOSED"))
+        order.refresh_from_db()
+        self.assertEqual(order.status, OrderStatus.PENDING)
+
+    def test_provider_transaction_id_cannot_pay_two_orders(self):
+        first_order = create_order(self.user, self.standard_offer, provider="mock")
+        transaction_id = "provider-tx-shared"
+        complete_order(
+            first_order,
+            self.payment_event(first_order, provider_transaction_id=transaction_id),
+        )
+
+        second_user = User.objects.create(username="duplicate-provider-transaction")
+        second_order = create_order(second_user, self.standard_offer, provider="mock")
+        with self.assertRaises(PaymentRejected):
+            complete_order(
+                second_order,
+                self.payment_event(second_order, provider_transaction_id=transaction_id),
+            )
+        second_order.refresh_from_db()
+        self.assertEqual(second_order.status, OrderStatus.PENDING)
+        self.assertEqual(
+            PaymentTransaction.objects.filter(
+                provider="mock",
+                provider_transaction_id=transaction_id,
+                accepted=True,
+            ).count(),
+            1,
+        )
 
     def test_payment_payload_secrets_are_redacted(self):
         order = create_order(self.user, self.standard_offer, provider="mock")
@@ -268,6 +375,51 @@ class BillingServiceTests(TestCase):
             resolve_managed_account(self.user)
         order.refresh_from_db()
         self.assertEqual(order.status, OrderStatus.PAID)
+
+    def test_refund_releases_assignment_but_keeps_business_history(self):
+        order, subscription = self.purchase()
+        assignment = ensure_assignment(subscription)
+        refund_order(order)
+        subscription.refresh_from_db()
+        assignment.refresh_from_db()
+        self.assertEqual(subscription.status, SubscriptionStatus.REFUNDED)
+        self.assertFalse(assignment.active)
+        self.assertTrue(AccountAssignmentEvent.objects.filter(assignment=assignment).exists())
+        self.assertTrue(PaymentTransaction.objects.filter(order=order).exists())
+
+    def test_archived_plan_keeps_existing_subscription_usable(self):
+        _, subscription = self.purchase()
+        assignment = ensure_assignment(subscription)
+        self.standard_plan.is_archived = True
+        self.standard_plan.is_active = False
+        self.standard_plan.save(update_fields=["is_archived", "is_active", "updated_at"])
+        self.assertEqual(ensure_assignment(subscription).account_id, assignment.account_id)
+        another_user = User.objects.create(username="archived-plan-new-user")
+        with self.assertRaises(BillingError):
+            create_order(another_user, self.standard_offer)
+
+    def test_managed_login_keeps_existing_model_and_quota_controls(self):
+        self.user.model_limit = ["gpt-5"]
+        self.user.daily_quota = 12
+        self.user.monthly_quota = 120
+        self.user.force_chat_mode = True
+        self.user.save(update_fields=["model_limit", "daily_quota", "monthly_quota", "force_chat_mode"])
+        self.purchase()
+        request = APIRequestFactory().post(
+            "/0x/chatgpt/login",
+            {"login_mode": "api"},
+            format="json",
+            HTTP_USER_AGENT="billing-managed-login-test",
+        )
+        force_authenticate(request, user=self.user)
+        with patch("app.chatgpt.views.chatgpt.req_gateway", side_effect=[{}, {"message": "ok"}]) as gateway:
+            response = ChatGPTLoginView.as_view()(request)
+        self.assertEqual(response.status_code, 200)
+        login_payload = gateway.call_args_list[1].kwargs["json"]
+        self.assertEqual(login_payload["limits"], ["gpt-5"])
+        self.assertEqual(login_payload["daily_quota"], 12)
+        self.assertEqual(login_payload["monthly_quota"], 120)
+        self.assertNotIn("chatgpt_id", login_payload)
 
 
 @override_settings(
@@ -358,6 +510,21 @@ class BillingApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(self.user.notifications.filter(title="服务器迁移").exists())
+
+    def test_notification_compatibility_routes_list_and_mark_read(self):
+        notification = UserNotification.objects.create(
+            user=self.user,
+            title="维护通知",
+            content="服务维护已经完成。",
+        )
+        self.client.force_authenticate(self.user)
+        listed = self.client.get("/0x/notifications")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.data["unread_count"], 1)
+        marked = self.client.post(f"/0x/notifications/{notification.id}/read", {}, format="json")
+        self.assertEqual(marked.status_code, 200)
+        notification.refresh_from_db()
+        self.assertIsNotNone(notification.read_at)
 
     @patch("app.accounts.views.backup.req_gateway", return_value={"version": 1})
     def test_encrypted_backup_contains_billing_models(self, _gateway):

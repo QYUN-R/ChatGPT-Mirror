@@ -1,0 +1,14 @@
+FROM postgres:16-alpine
+
+RUN apk add --no-cache openssl
+
+COPY scripts/backup-postgres.sh /usr/local/bin/backup-postgres.sh
+COPY scripts/restore-postgres.sh /usr/local/bin/restore-postgres.sh
+COPY scripts/test-postgres-restore.sh /usr/local/bin/test-postgres-restore.sh
+
+RUN chmod 0755 /usr/local/bin/backup-postgres.sh \
+    /usr/local/bin/restore-postgres.sh \
+    /usr/local/bin/test-postgres-restore.sh
+
+ENTRYPOINT []
+CMD ["sh"]
