@@ -93,6 +93,17 @@ class Command(BaseCommand):
                     update_fields=update_fields,
                     unique_fields=[model._meta.pk.name],
                 )
+                generated_timestamp_fields = [
+                    field.name
+                    for field in concrete_fields
+                    if getattr(field, "auto_now", False) or getattr(field, "auto_now_add", False)
+                ]
+                if generated_timestamp_fields:
+                    model.objects.using("default").bulk_update(
+                        source_objects,
+                        fields=generated_timestamp_fields,
+                        batch_size=batch_size,
+                    )
                 copied_models.append(model)
 
             if not dry_run:
