@@ -34,14 +34,13 @@ services:
       POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
       CELERY_BROKER_URL: "${CELERY_BROKER_URL:-redis://redis:6379/0}"
       CELERY_RESULT_BACKEND: "${CELERY_RESULT_BACKEND:-redis://redis:6379/1}"
+      EMAIL_HOST_PASSWORD_FILE: "${EMAIL_HOST_PASSWORD_FILE:-/run/secrets/qq_smtp_password}"
     depends_on:
       redis:
         condition: service_healthy
     secrets:
-      - source: alipay_app_private_key
-        target: alipay_app_private_key
-      - source: alipay_public_key
-        target: alipay_public_key
+      - source: qq_smtp_password
+        target: qq_smtp_password
 
   worker:
     image: chatgpt-mirror-commercial-backend:local
@@ -65,14 +64,13 @@ services:
       POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
       CELERY_BROKER_URL: "${CELERY_BROKER_URL:-redis://redis:6379/0}"
       CELERY_RESULT_BACKEND: "${CELERY_RESULT_BACKEND:-redis://redis:6379/1}"
+      EMAIL_HOST_PASSWORD_FILE: "${EMAIL_HOST_PASSWORD_FILE:-/run/secrets/qq_smtp_password}"
     volumes:
       - ./backend/logs:/app/backend/logs
       - ./backend/db:/app/backend/db
     secrets:
-      - source: alipay_app_private_key
-        target: alipay_app_private_key
-      - source: alipay_public_key
-        target: alipay_public_key
+      - source: qq_smtp_password
+        target: qq_smtp_password
     depends_on:
       redis:
         condition: service_healthy
@@ -192,7 +190,5 @@ volumes:
   postgres-data:
 
 secrets:
-  alipay_app_private_key:
-    file: ./secrets/alipay_app_private_key.pem
-  alipay_public_key:
-    file: ./secrets/alipay_public_key.pem
+  qq_smtp_password:
+    file: ./secrets/qq_smtp_password

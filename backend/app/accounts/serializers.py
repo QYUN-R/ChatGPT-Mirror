@@ -2,6 +2,7 @@ from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 
+from app.accounts.email_auth import normalize_email
 from app.accounts.models import User, VisitLog
 from app.chatgpt.models import ChatgptAccount
 from app.settings import ADMIN_USERNAME
@@ -24,6 +25,7 @@ class ShowUserAccountModelSerializer(serializers.ModelSerializer):
     use_count = serializers.SerializerMethodField()
     chatgpt_count = serializers.SerializerMethodField()
     subscription = serializers.SerializerMethodField()
+    email_verified = serializers.SerializerMethodField()
 
     def __init__(self, *args, use_count_dict=dict, **kwargs):
         super().__init__(*args, **kwargs)
@@ -47,10 +49,13 @@ class ShowUserAccountModelSerializer(serializers.ModelSerializer):
             "ends_at": subscription.ends_at,
         }
 
+    def get_email_verified(self, obj):
+        return bool(obj.email and obj.email_verified_at)
+
     class Meta:
         model = User
         exclude = (
-            "password", "is_superuser", "first_name", "last_name", "email", "is_staff", "groups", "user_permissions")
+            "password", "is_superuser", "first_name", "last_name", "is_staff", "groups", "user_permissions")
         # fields = "__all__"
 
 
@@ -58,6 +63,7 @@ class AddUserAccountSerializer(serializers.Serializer):
     id = serializers.IntegerField(required=False)
     is_active = serializers.BooleanField()
     username = serializers.CharField(min_length=4)
+    email = serializers.EmailField(required=False, allow_blank=True)
     password = serializers.CharField(required=False)
     gptcar_list = serializers.JSONField(default=list)
     model_limit = serializers.JSONField(default=dict)
@@ -99,8 +105,9 @@ class BatchUserActionSerializer(serializers.Serializer):
 
 
 class UserRegisterSerializer(serializers.Serializer):
-    username = serializers.CharField(min_length=4)
+    email = serializers.EmailField()
     password = serializers.CharField()
+    verification_code = serializers.CharField(min_length=6, max_length=6)
     chatgpt_token = serializers.CharField(required=False, allow_blank=True)
 
     def validate(self, attrs):
@@ -110,15 +117,59 @@ class UserRegisterSerializer(serializers.Serializer):
             raise serializers.ValidationError({"chatgpt_token": "上游账号令牌不能为空"})
         return attrs
 
+    def validate_email(self, value):
+        return normalize_email(value)
+
     def validate_password(self, value):
         try:
             validate_password(
                 value,
-                User(username=str(self.initial_data.get("username") or "")),
+                User(username=str(self.initial_data.get("email") or "")),
             )
         except DjangoValidationError as exc:
             raise serializers.ValidationError(list(exc.messages))
         return value
+
+    def validate_email(self, value):
+        if not value:
+            return ""
+        return normalize_email(value)
+
+
+class EmailVerificationRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        return normalize_email(value)
+
+
+class PasswordResetConfirmSerializer(EmailVerificationRequestSerializer):
+    verification_code = serializers.CharField(min_length=6, max_length=6)
+    new_password = serializers.CharField()
+
+    def validate_new_password(self, value):
+        try:
+            validate_password(value, User(username=str(self.initial_data.get("email") or "")))
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(list(exc.messages))
+        return value
+
+
+class EmailBindingRequestSerializer(EmailVerificationRequestSerializer):
+    binding_ticket = serializers.CharField()
+
+
+class EmailBindingConfirmSerializer(serializers.Serializer):
+    binding_ticket = serializers.CharField()
+    verification_code = serializers.CharField(min_length=6, max_length=6)
+
+
+class EmailChangeRequestSerializer(EmailVerificationRequestSerializer):
+    current_password = serializers.CharField()
+
+
+class EmailChangeConfirmSerializer(serializers.Serializer):
+    verification_code = serializers.CharField(min_length=6, max_length=6)
 
 
 class ChangePasswordSerializer(serializers.Serializer):

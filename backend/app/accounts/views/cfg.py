@@ -3,7 +3,14 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.exceptions import ValidationError
 
-from app.settings import ALLOW_REGISTER, BILLING_ENABLED, SHOW_GITHUB, TURNSTILE_ENABLED, TURNSTILE_SITE_KEY
+from app.settings import (
+    ALLOW_REGISTER,
+    BILLING_ENABLED,
+    EMAIL_VERIFICATION_ENABLED,
+    SHOW_GITHUB,
+    TURNSTILE_ENABLED,
+    TURNSTILE_SITE_KEY,
+)
 from app.utils import req_gateway
 
 
@@ -16,6 +23,7 @@ class VersionConfig(APIView):
             'show_github': SHOW_GITHUB,
             'allow_register': ALLOW_REGISTER,
             'billing_enabled': BILLING_ENABLED,
+            'email_verification_enabled': EMAIL_VERIFICATION_ENABLED,
             'turnstile_enabled': TURNSTILE_ENABLED,
             'turnstile_site_key': TURNSTILE_SITE_KEY if TURNSTILE_ENABLED else '',
         })

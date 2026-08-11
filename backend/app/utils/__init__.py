@@ -110,5 +110,5 @@ def save_visit_log(request, log_type, chatgpt_username=None):
         "chatgpt_username": chatgpt_username,
         "username": request.user.username,
         "created_at": int(time.time()),
-        "user_agent": request.headers.get('User-Agent'),
+        "user_agent": request.headers.get('User-Agent', ''),
     })

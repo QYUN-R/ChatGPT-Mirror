@@ -44,6 +44,18 @@ def required_env(key: str) -> str:
     return value
 
 
+def optional_secret_file(path_key: str, fallback_key: str) -> str:
+    path = os.environ.get(path_key, "").strip()
+    if not path:
+        return os.environ.get(fallback_key, "")
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        # Workers that do not send mail (for example Beat) must still be able
+        # to load Django settings; the delivery path validates configuration.
+        return os.environ.get(fallback_key, "")
+
+
 # SECURITY WARNING: keep the secret key used in production secret.
 SECRET_KEY = (
     required_env("DJANGO_SECRET_KEY")
@@ -188,6 +200,9 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "login_ip": "20/min",
         "login_account": "10/min",
+        "email_verification_ip": "20/hour",
+        "email_verification_address": "8/hour",
+        "email_verification_attempt": "40/hour",
         "expensive_user": "30/min",
         "user": "120/min",
     },
@@ -319,6 +334,7 @@ ALIPAY_RECONCILE_BATCH_SIZE = int(os.environ.get("ALIPAY_RECONCILE_BATCH_SIZE", 
 
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/1")
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = int(os.environ.get("CELERY_TASK_TIME_LIMIT", "300"))
 CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", False)
@@ -347,6 +363,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "app.billing.tasks.expire_pending_alipay_orders_task",
         "schedule": 120.0,
     },
+    "email-verification-delivery-recovery-every-minute": {
+        "task": "app.accounts.tasks.recover_pending_verification_emails_task",
+        "schedule": 60.0,
+    },
 }
 
 EMAIL_NOTIFICATIONS_ENABLED = env_bool("EMAIL_NOTIFICATIONS_ENABLED", False)
@@ -357,11 +377,41 @@ EMAIL_BACKEND = os.environ.get(
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "")
 EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "465"))
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
-EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+EMAIL_HOST_PASSWORD_FILE = os.environ.get("EMAIL_HOST_PASSWORD_FILE", "").strip()
+EMAIL_HOST_PASSWORD = optional_secret_file("EMAIL_HOST_PASSWORD_FILE", "EMAIL_HOST_PASSWORD")
 EMAIL_USE_SSL = env_bool("EMAIL_USE_SSL", True)
 EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", False)
 EMAIL_TIMEOUT = int(os.environ.get("EMAIL_TIMEOUT", "15"))
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER or "noreply@localhost")
+EMAIL_VERIFICATION_ENABLED = env_bool("EMAIL_VERIFICATION_ENABLED", False)
+EMAIL_ALLOWED_DOMAINS = frozenset(
+    item.lower()
+    for item in env_list(
+        "EMAIL_ALLOWED_DOMAINS",
+        "qq.com,vip.qq.com,foxmail.com,163.com,126.com,yeah.net,gmail.com,googlemail.com",
+    )
+)
+EMAIL_VERIFICATION_CODE_TTL_SECONDS = int(
+    os.environ.get("EMAIL_VERIFICATION_CODE_TTL_SECONDS", "600")
+)
+EMAIL_VERIFICATION_RESEND_SECONDS = int(
+    os.environ.get("EMAIL_VERIFICATION_RESEND_SECONDS", "60")
+)
+EMAIL_VERIFICATION_RATE_WINDOW_SECONDS = int(
+    os.environ.get("EMAIL_VERIFICATION_RATE_WINDOW_SECONDS", "900")
+)
+EMAIL_VERIFICATION_MAX_SENDS_PER_WINDOW = int(
+    os.environ.get("EMAIL_VERIFICATION_MAX_SENDS_PER_WINDOW", "3")
+)
+EMAIL_VERIFICATION_MAX_ATTEMPTS = int(
+    os.environ.get("EMAIL_VERIFICATION_MAX_ATTEMPTS", "5")
+)
+EMAIL_VERIFICATION_DELIVERY_MAX_ATTEMPTS = int(
+    os.environ.get("EMAIL_VERIFICATION_DELIVERY_MAX_ATTEMPTS", "3")
+)
+EMAIL_BINDING_TICKET_TTL_SECONDS = int(
+    os.environ.get("EMAIL_BINDING_TICKET_TTL_SECONDS", "900")
+)
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.1/howto/static-files/

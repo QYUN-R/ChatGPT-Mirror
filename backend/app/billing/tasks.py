@@ -60,8 +60,8 @@ def send_notification_email_task(notification_id):
     if not settings.EMAIL_NOTIFICATIONS_ENABLED:
         return False
     notification = UserNotification.objects.select_related("user").get(pk=notification_id)
-    recipient = (notification.user.email or notification.user.username or "").strip()
-    if "@" not in recipient:
+    recipient = (notification.user.email or "").strip()
+    if not notification.user.email_verified_at or "@" not in recipient:
         return False
     send_mail(
         subject=notification.title,

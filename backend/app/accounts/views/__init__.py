@@ -1,6 +1,7 @@
 import time
 from datetime import datetime
 
+from django.db import IntegrityError
 from django.db.models import Q
 from django.utils import timezone
 from django.middleware.csrf import get_token, rotate_token
@@ -10,7 +11,7 @@ from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from app.accounts.models import User, VisitLog
+from app.accounts.models import EmailVerificationChallenge, User, VisitLog
 from app.accounts.serializers import ShowVisitLogModelSerializer, AddUserAccountSerializer, UserBindChatGPTSerializer, \
     ShowUserAccountModelSerializer, BatchModelLimitSerializer, BatchUserActionSerializer, ChangePasswordSerializer
 from app.accounts.authentication import set_auth_cookie
@@ -18,10 +19,11 @@ from rest_framework.authtoken.models import Token
 from app.chatgpt.models import ChatgptAccount
 from app.page import DefaultPageNumberPagination
 from app.settings import ADMIN_USERNAME
-from app.utils import get_request_subject, req_gateway
+from app.utils import get_client_ip, get_request_subject, req_gateway
+from app.accounts.email_auth import has_verified_email, issue_binding_ticket
 from app.accounts.views.login import issue_user_token
 from app.billing.exceptions import BillingError
-from app.billing.services import resolve_managed_account
+from app.billing.services import audit, resolve_managed_account
 
 
 def revoke_user_sessions(user):
@@ -235,7 +237,9 @@ class UserAccountView(generics.ListCreateAPIView):
         queryset = User.objects.select_related("billing_subscription__plan").order_by("-id").all()
         query = str(request.query_params.get("q") or "").strip()
         if query:
-            queryset = queryset.filter(Q(username__icontains=query) | Q(remark__icontains=query))
+            queryset = queryset.filter(
+                Q(username__icontains=query) | Q(email__icontains=query) | Q(remark__icontains=query)
+            )
         status = request.query_params.get("status")
         if status in ("active", "inactive"):
             queryset = queryset.filter(is_active=status == "active")
@@ -264,8 +268,21 @@ class UserAccountView(generics.ListCreateAPIView):
                 raise ValidationError({"password": "新增用户必须设置密码"})
             user = User(username=serializer.data["username"])
 
+        requested_email = serializer.validated_data.get("email")
+        email_changed = requested_email is not None and requested_email != user.email
+        if email_changed and requested_email:
+            email_in_use = User.objects.filter(
+                Q(email__iexact=requested_email) | Q(username__iexact=requested_email)
+            ).exclude(pk=user.pk).exists()
+            if email_in_use:
+                raise ValidationError({"email": "该邮箱已被其他账户使用"})
+
         if serializer.data.get("password"):
             user.set_password(serializer.data["password"])
+
+        if email_changed:
+            user.email = requested_email
+            user.email_verified_at = None
 
         if "expired_date" in serializer.data.keys():
             user.expired_date = serializer.data["expired_date"]
@@ -279,7 +296,27 @@ class UserAccountView(generics.ListCreateAPIView):
         user.monthly_quota = serializer.data.get("monthly_quota", 0)
         if "force_chat_mode" in serializer.validated_data:
             user.force_chat_mode = serializer.validated_data["force_chat_mode"]
-        user.save()
+        try:
+            user.save()
+        except IntegrityError as exc:
+            if email_changed:
+                raise ValidationError({"email": "该邮箱已被其他账户使用"}) from exc
+            raise
+
+        if email_changed:
+            EmailVerificationChallenge.objects.filter(
+                user=user,
+                consumed_at__isnull=True,
+                invalidated_at__isnull=True,
+                locked_at__isnull=True,
+            ).update(invalidated_at=timezone.now())
+            audit(
+                "user.email_changed",
+                user,
+                actor=request.user,
+                detail={"verification_reset": True},
+                ip_address=get_client_ip(request),
+            )
 
         if "force_chat_mode" in serializer.validated_data:
             try:
@@ -290,7 +327,7 @@ class UserAccountView(generics.ListCreateAPIView):
             except ValidationError:
                 pass
 
-        credentials_changed = bool(serializer.data.get("password"))
+        credentials_changed = bool(serializer.data.get("password")) or email_changed
         access_revoked = not user.is_active or (
             user.expired_date and user.expired_date <= timezone.localdate()
         )
@@ -370,13 +407,18 @@ class CurrentUserView(APIView):
     permission_classes = (IsAuthenticated,)
 
     def get(self, request):
-        return Response({
+        result = {
             "authenticated": True,
             "username": request.user.username,
+            "email": request.user.email,
+            "email_verified": has_verified_email(request.user),
             "is_admin": bool(request.user.is_staff or request.user.is_superuser),
             "quota": quota_snapshot(request.user),
             "csrf_token": get_token(request),
-        })
+        }
+        if not result["email_verified"]:
+            result["email_binding_ticket"] = issue_binding_ticket(request.user)
+        return Response(result)
 
 
 class ChangePasswordView(APIView):

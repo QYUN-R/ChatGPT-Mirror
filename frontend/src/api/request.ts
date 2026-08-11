@@ -73,6 +73,7 @@ const request = async (url: string, method = 'GET', body?: any) => {
     const response = await fetch(normalizeUrl(url), {
       method,
       headers,
+      credentials: 'include',
       body: body ? JSON.stringify(body) : undefined
     })
 

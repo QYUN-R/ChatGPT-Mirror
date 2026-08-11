@@ -11,6 +11,16 @@ const clearAccessibleCookies = () => {
   }
 }
 
+const extractLoginError = (error: any): string => {
+  if (typeof error?.message === 'string' && error.message.trim()) return error.message
+  if (typeof error?.detail === 'string' && error.detail.trim()) return error.detail
+  for (const value of Object.values(error || {})) {
+    if (Array.isArray(value) && value.length > 0) return String(value[0])
+    if (typeof value === 'string' && value.trim()) return value
+  }
+  return '登录失败'
+}
+
 export const useUserStore = defineStore('user', () => {
   const authenticated = ref(false)
   const isAdmin = ref(false)
@@ -36,12 +46,13 @@ export const useUserStore = defineStore('user', () => {
       headers: {
         'Content-Type': 'application/json'
       },
+      credentials: 'include',
       body: JSON.stringify(data)
     })
 
     if (!response.ok) {
       const error = await response.json()
-      throw new Error(error.message || '登录失败')
+      throw new Error(extractLoginError(error))
     }
 
     const result = await response.json()
@@ -59,7 +70,7 @@ export const useUserStore = defineStore('user', () => {
     if (hydrated) return authenticated.value
     hydrated = true
     try {
-      const response = await fetch('/0x/user/me')
+      const response = await fetch('/0x/user/me', { credentials: 'include' })
       if (!response.ok) return false
       const result = await response.json()
       authenticated.value = Boolean(result.authenticated)
@@ -80,6 +91,7 @@ export const useUserStore = defineStore('user', () => {
         await fetch('/0x/user/logout', {
           method: 'POST',
           keepalive: true,
+          credentials: 'include',
           headers: activeCsrfToken ? { 'X-CSRFToken': decodeURIComponent(activeCsrfToken) } : {}
         })
       } catch {

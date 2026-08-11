@@ -31,6 +31,16 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/pages/login/index.vue')
   },
   {
+    path: '/forgot-password',
+    name: 'ForgotPassword',
+    component: () => import('@/pages/login/index.vue')
+  },
+  {
+    path: '/bind-email',
+    name: 'BindEmail',
+    component: () => import('@/pages/login/index.vue')
+  },
+  {
     path: '/login-chatgpt',
     name: 'LoginChatgpt',
     component: () => import('@/pages/login/chatgpt.vue')
@@ -141,19 +151,19 @@ const routes: RouteRecordRaw[] = [
         path: 'billing',
         name: 'Billing',
         component: () => import('@/pages/account/billing.vue'),
-        meta: { title: '套餐中心' }
+        meta: { title: '套餐中心', memberOnly: true }
       },
       {
         path: 'notifications',
         name: 'Notifications',
         component: () => import('@/pages/account/notifications.vue'),
-        meta: { title: '通知' }
+        meta: { title: '通知', memberOnly: true }
       },
       {
         path: 'support',
         name: 'SupportCenter',
         component: () => import('@/pages/account/support.vue'),
-        meta: { title: '售后支持' }
+        meta: { title: '售后支持', memberOnly: true }
       }
     ]
   }
@@ -168,6 +178,7 @@ const router = createRouter({
 router.beforeEach(async (to, _from, next) => {
   const userStore = useUserStore()
   const isLoginPage = to.path === '/login' || to.path === '/login-chatgpt'
+  const isPublicAuthPage = ['/login', '/register', '/forgot-password', '/bind-email'].includes(to.path)
 
   if (isLoginPage && hasChatGPTSession()) {
     window.location.replace('/chat')
@@ -180,6 +191,10 @@ router.beforeEach(async (to, _from, next) => {
     next('/account/billing')
     return
   }
+  if (to.meta.memberOnly && authenticated && userStore.isAdmin) {
+    next('/account/overview')
+    return
+  }
   if (to.meta.requiresAdmin && (!authenticated || !userStore.isAdmin)) {
     clearAccessibleCookies()
     window.location.replace('/admin#/')
@@ -187,7 +202,7 @@ router.beforeEach(async (to, _from, next) => {
     return
   }
   
-  if (to.path !== '/login' && to.path !== '/register' && !authenticated) {
+  if (!isPublicAuthPage && to.path !== '/login-chatgpt' && !authenticated) {
     next('/login')
   } else {
     next()

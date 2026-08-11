@@ -3,86 +3,42 @@
     <t-layout class="layout-shell">
       <t-aside class="sidebar" width="232px">
         <div class="sidebar-title">
-          管理
+          <t-icon class="brand-icon" name="dashboard" />
+          <div class="brand-copy">
+            <strong>Chat2</strong>
+            <span>{{ isAdmin ? '管理后台' : '用户中心' }}</span>
+          </div>
         </div>
-        <t-menu class="nav-menu" :value="activeMenu" theme="light" @change="handleMenuChange">
-          <t-menu-item v-if="userStore.isAdmin" value="/account/overview">
-            <template #icon><t-icon name="dashboard" /></template>
-            <span class="menu-label">运维概览</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/user">
-            <template #icon><t-icon name="user" /></template>
-            <span class="menu-label">用户</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/chatgpt">
-            <template #icon><t-icon name="root-list" /></template>
-            <span class="menu-label">上游账号</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/gptcar">
-            <template #icon><t-icon name="server" /></template>
-            <span class="menu-label">账号池</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/plans">
-            <template #icon><t-icon name="money-circle" /></template>
-            <span class="menu-label">套餐配置</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/pools">
-            <template #icon><t-icon name="layers" /></template>
-            <span class="menu-label">商业号池</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/subscriptions">
-            <template #icon><t-icon name="usergroup" /></template>
-            <span class="menu-label">用户订阅</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/orders">
-            <template #icon><t-icon name="order-ascending" /></template>
-            <span class="menu-label">订单</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/announcements">
-            <template #icon><t-icon name="notification" /></template>
-            <span class="menu-label">公告</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/support-contacts">
-            <template #icon><t-icon name="service" /></template>
-            <span class="menu-label">售后支持</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/audit">
-            <template #icon><t-icon name="history" /></template>
-            <span class="menu-label">审计日志</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/logs">
-            <template #icon><t-icon name="file" /></template>
-            <span class="menu-label">日志</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/proxy">
-            <template #icon><t-icon name="internet" /></template>
-            <span class="menu-label">代理</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/scripts">
-            <template #icon><t-icon name="code" /></template>
-            <span class="menu-label">脚本</span>
-          </t-menu-item>
-          <t-menu-item v-if="userStore.isAdmin" value="/account/access">
-            <template #icon><t-icon name="secured" /></template>
-            <span class="menu-label">访问与安全</span>
-          </t-menu-item>
-          <t-menu-item value="/account/billing">
-            <template #icon><t-icon name="wallet" /></template>
-            <span class="menu-label">套餐中心</span>
-          </t-menu-item>
-          <t-menu-item value="/account/notifications">
-            <template #icon><t-icon name="mail" /></template>
-            <span class="menu-label">通知</span>
-          </t-menu-item>
-          <t-menu-item value="/account/support">
-            <template #icon><t-icon name="service" /></template>
-            <span class="menu-label">售后支持</span>
-          </t-menu-item>
-          <t-menu-item value="/account/profile">
+        <nav class="navigation" :aria-label="isAdmin ? '管理后台导航' : '用户中心导航'">
+          <template v-if="isAdmin">
+            <section v-for="section in adminNavigation" :key="section.label" class="nav-section">
+              <p class="nav-section-label">{{ section.label }}</p>
+              <t-menu class="nav-menu" :value="activeMenu" theme="light" @change="handleMenuChange">
+                <t-menu-item v-for="item in section.items" :key="item.path" :value="item.path">
+                  <template #icon><t-icon :name="item.icon" /></template>
+                  <span class="menu-label">{{ item.label }}</span>
+                </t-menu-item>
+              </t-menu>
+            </section>
+          </template>
+          <template v-else>
+            <section v-for="section in memberNavigation" :key="section.label" class="nav-section">
+              <p class="nav-section-label">{{ section.label }}</p>
+              <t-menu class="nav-menu" :value="activeMenu" theme="light" @change="handleMenuChange">
+                <t-menu-item v-for="item in section.items" :key="item.path" :value="item.path">
+                  <template #icon><t-icon :name="item.icon" /></template>
+                  <span class="menu-label">{{ item.label }}</span>
+                </t-menu-item>
+              </t-menu>
+            </section>
+          </template>
+        </nav>
+        <div class="sidebar-footer">
+          <t-button class="profile-link" variant="text" block @click="router.push('/account/profile')">
             <template #icon><t-icon name="user-circle" /></template>
-            <span class="menu-label">账户中心</span>
-          </t-menu-item>
-        </t-menu>
+            <span>{{ isAdmin ? '账户设置' : '账户中心' }}</span>
+          </t-button>
+        </div>
       </t-aside>
       <t-layout class="workspace">
         <t-header class="header">
@@ -117,11 +73,66 @@ const router = useRouter()
 const userStore = useUserStore()
 
 const activeMenu = computed(() => route.path)
+const isAdmin = computed(() => userStore.isAdmin)
 const username = computed(() => userStore.username || '管理员')
-const pageTitle = computed(() => String(route.meta.title || '管理'))
+const pageTitle = computed(() => String(route.meta.title || (isAdmin.value ? '管理后台' : '用户中心')))
+
+type NavigationItem = {
+  label: string
+  path: string
+  icon: string
+}
+
+type NavigationSection = {
+  label: string
+  items: NavigationItem[]
+}
+
+const adminNavigation: NavigationSection[] = [
+  {
+    label: '运营',
+    items: [
+      { label: '运维概览', path: '/account/overview', icon: 'dashboard' },
+      { label: '用户', path: '/account/user', icon: 'user' },
+      { label: '上游账号', path: '/account/chatgpt', icon: 'root-list' },
+      { label: '账号池', path: '/account/gptcar', icon: 'server' }
+    ]
+  },
+  {
+    label: '商业管理',
+    items: [
+      { label: '套餐配置', path: '/account/plans', icon: 'money-circle' },
+      { label: '商业号池', path: '/account/pools', icon: 'layers' },
+      { label: '用户订阅', path: '/account/subscriptions', icon: 'usergroup' },
+      { label: '订单', path: '/account/orders', icon: 'order-ascending' }
+    ]
+  },
+  {
+    label: '系统设置',
+    items: [
+      { label: '公告', path: '/account/announcements', icon: 'notification' },
+      { label: '售后设置', path: '/account/support-contacts', icon: 'service' },
+      { label: '审计日志', path: '/account/audit', icon: 'history' },
+      { label: '日志', path: '/account/logs', icon: 'file' },
+      { label: '代理', path: '/account/proxy', icon: 'internet' },
+      { label: '脚本', path: '/account/scripts', icon: 'code' },
+      { label: '访问与安全', path: '/account/access', icon: 'secured' }
+    ]
+  }
+]
+
+const memberNavigation: NavigationSection[] = [
+  {
+    label: '服务',
+    items: [
+      { label: '套餐中心', path: '/account/billing', icon: 'wallet' },
+      { label: '通知', path: '/account/notifications', icon: 'mail' },
+      { label: '售后支持', path: '/account/support', icon: 'service' }
+    ]
+  }
+]
 
 const userOptions = [
-  { content: '账户中心', value: 'profile' },
   { content: '退出登录', value: 'logout' }
 ]
 
@@ -130,10 +141,6 @@ const handleMenuChange = (value: string) => {
 }
 
 const handleUserAction = (data: { value: string }) => {
-  if (data.value === 'profile') {
-    router.push('/account/profile')
-    return
-  }
   if (data.value === 'logout') {
     userStore.logout()
     router.push('/login')
@@ -163,35 +170,80 @@ const handleUserAction = (data: { value: string }) => {
   background: #f1f1ee;
   border-right: 1px solid var(--app-border);
   overflow-x: hidden;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .sidebar-title {
   display: flex;
   align-items: center;
-  height: 64px;
-  padding: 0 22px;
+  gap: 11px;
+  height: 68px;
+  padding: 0 18px;
   color: var(--app-text);
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
   border-bottom: 1px solid var(--app-border);
+}
+
+.brand-icon {
+  flex: 0 0 auto;
+  color: #4f8061;
+  font-size: 19px;
+}
+
+.brand-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.brand-copy strong {
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.brand-copy span {
+  color: var(--app-text-muted);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.navigation {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 14px 10px 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.nav-section + .nav-section {
+  margin-top: 16px;
+}
+
+.nav-section-label {
+  margin: 0 0 6px;
+  padding: 0 10px;
+  color: #8a8a84;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
 }
 
 .nav-menu {
   width: 100%;
   min-width: 0;
-  padding: 12px 10px;
+  padding: 0;
   background: transparent;
   overflow-x: hidden;
 }
 
 .nav-menu :deep(.t-menu__item) {
   min-width: 0;
-  height: 44px;
-  margin-bottom: 4px;
+  height: 40px;
+  margin-bottom: 2px;
   color: #555550;
-  border-radius: 8px;
+  border-radius: 7px;
 }
 
 .nav-menu :deep(.t-menu__item:hover) {
@@ -203,6 +255,25 @@ const handleUserAction = (data: { value: string }) => {
   color: var(--app-text);
   font-weight: 600;
   background: #dededa;
+}
+
+.sidebar-footer {
+  flex: 0 0 auto;
+  padding: 10px;
+  border-top: 1px solid var(--app-border);
+}
+
+.profile-link {
+  justify-content: flex-start;
+  height: 40px;
+  color: #555550;
+  font-size: 14px;
+  border-radius: 7px;
+}
+
+.profile-link:hover {
+  color: var(--app-text);
+  background: #e8e8e4;
 }
 
 .workspace {
@@ -270,22 +341,36 @@ const handleUserAction = (data: { value: string }) => {
   .sidebar-title {
     justify-content: center;
     padding: 0;
-    font-size: 0;
   }
 
-  .sidebar-title::after {
-    font-size: 15px;
-    content: "管理";
+  .brand-copy,
+  .nav-section-label,
+  .profile-link span {
+    display: none;
   }
 
-  .nav-menu {
+  .navigation {
     padding: 12px 8px;
+  }
+
+  .nav-section + .nav-section {
+    margin-top: 10px;
   }
 
   .nav-menu :deep(.t-menu__item) {
     width: 60px;
     min-width: 60px;
     justify-content: center;
+    padding: 0;
+  }
+
+  .sidebar-footer {
+    padding: 8px;
+  }
+
+  .profile-link {
+    justify-content: center;
+    min-width: 60px;
     padding: 0;
   }
 
@@ -312,6 +397,10 @@ const handleUserAction = (data: { value: string }) => {
 
   .nav-menu :deep(.t-menu__item) {
     width: 48px;
+    min-width: 48px;
+  }
+
+  .profile-link {
     min-width: 48px;
   }
 

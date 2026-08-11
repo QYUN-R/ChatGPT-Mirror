@@ -8,7 +8,7 @@
         </t-button>
       </template>
       <div class="table-toolbar">
-        <t-input v-model="query" clearable placeholder="搜索用户名或备注" @enter="applyFilters" />
+        <t-input v-model="query" clearable placeholder="搜索用户名、邮箱或备注" @enter="applyFilters" />
         <t-select v-model="statusFilter" clearable placeholder="全部状态" @change="applyFilters">
           <t-option value="active" label="启用" />
           <t-option value="inactive" label="禁用" />
@@ -31,6 +31,14 @@
           <t-tag :theme="row.is_active ? 'success' : 'danger'">
             {{ row.is_active ? '启用' : '禁用' }}
           </t-tag>
+        </template>
+        <template #email="{ row }">
+          <div class="email-cell">
+            <span class="email-value">{{ row.email || '未绑定' }}</span>
+            <t-tag v-if="row.email" :theme="row.email_verified ? 'success' : 'warning'" size="small" variant="light">
+              {{ row.email_verified ? '已验证' : '待验证' }}
+            </t-tag>
+          </div>
         </template>
         <template #expired_date="{ row }">
           {{ row.expired_date || '永久' }}
@@ -81,6 +89,12 @@
       <t-form :data="formData" :rules="formRules" ref="formRef" label-width="100px">
         <t-form-item label="用户名" name="username">
           <t-input v-model="formData.username" :disabled="isEdit" placeholder="请输入用户名" />
+        </t-form-item>
+        <t-form-item label="验证邮箱" name="email">
+          <t-input v-model="formData.email" placeholder="请输入 QQ、网易或 Google 邮箱" />
+          <template #help>
+            <span class="form-help">修改后会取消验证状态，并要求用户使用新邮箱完成验证码确认</span>
+          </template>
         </t-form-item>
         <t-form-item label="密码" name="password">
           <t-input v-model="formData.password" type="password" :placeholder="isEdit ? '留空则不修改' : '请输入密码'" />
@@ -156,6 +170,7 @@ const columns = [
   { colKey: 'row-select', type: 'multiple', width: 46 },
   { colKey: 'id', title: 'ID', width: 80 },
   { colKey: 'username', title: '用户名' },
+  { colKey: 'email', title: '邮箱与验证', cell: 'email', width: 220 },
   { colKey: 'is_active', title: '状态', cell: 'is_active', width: 80 },
   { colKey: 'model_limit', title: '模型限制', cell: 'model_limit', width: 180 },
   { colKey: 'force_chat_mode', title: 'Work 模式', cell: 'force_chat_mode', width: 110 },
@@ -168,6 +183,7 @@ const columns = [
 const formData = reactive({
   id: 0,
   username: '',
+  email: '',
   password: '',
   is_active: true,
   isolated_session: true,
@@ -224,6 +240,7 @@ const showAddDialog = () => {
   Object.assign(formData, {
     id: 0,
     username: '',
+    email: '',
     password: '',
     is_active: true,
     isolated_session: true,
@@ -244,6 +261,7 @@ const showEditDialog = (row: any) => {
   Object.assign(formData, {
     id: row.id,
     username: row.username,
+    email: row.email || '',
     password: '',
     is_active: row.is_active,
     isolated_session: row.isolated_session ?? true,
@@ -273,6 +291,7 @@ const handleSubmit = async () => {
   const method = 'POST'
   const payload = {
     username: formData.username,
+    email: formData.email.trim(),
     is_active: formData.is_active,
     isolated_session: formData.isolated_session,
     force_chat_mode: formData.force_chat_mode,
@@ -330,6 +349,16 @@ const batchAction = async (action: 'activate' | 'deactivate') => {
 <style scoped>
 .text-gray {
   color: var(--app-text-muted);
+}
+.email-cell {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.email-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .form-help {
   color: var(--app-text-muted);

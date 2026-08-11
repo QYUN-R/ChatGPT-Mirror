@@ -129,7 +129,7 @@ const presets = [
 onMounted(async () => {
   const [data, versionResponse] = await Promise.all([
     request('/0x/user/access-control'),
-    fetch('/0x/user/version-cfg').then(response => response.json()).catch(() => null)
+    fetch('/0x/user/version-cfg', { credentials: 'include' }).then(response => response.json()).catch(() => null)
   ])
   if (data) blockedPaths.value = (data.paths || data.hash_paths || []).map(toDisplayPath)
   if (versionResponse) {

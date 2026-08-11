@@ -1,0 +1,22 @@
+# Optional production payment overlay. Keep this file out of the normal
+# deployment command until the payment channel is approved and re-enabled.
+services:
+  django:
+    secrets:
+      - source: alipay_app_private_key
+        target: alipay_app_private_key
+      - source: alipay_public_key
+        target: alipay_public_key
+
+  worker:
+    secrets:
+      - source: alipay_app_private_key
+        target: alipay_app_private_key
+      - source: alipay_public_key
+        target: alipay_public_key
+
+secrets:
+  alipay_app_private_key:
+    file: "${ALIPAY_SECRET_ROOT:-./secrets}/alipay_app_private_key.pem"
+  alipay_public_key:
+    file: "${ALIPAY_SECRET_ROOT:-./secrets}/alipay_public_key.pem"
