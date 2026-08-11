@@ -16,6 +16,16 @@ PAYMENT_CALLBACK_MAX_FUTURE_SKEW_SECONDS=300
 
 `BILLING_ENFORCE_SUBSCRIPTION=false` 用于兼容已有用户。确认旧用户迁移完成后，才评估是否改为强制套餐。
 
+## 前端构建与发布
+
+`gateway/static` 是构建产物，不提交到 Git。每次更新包含 `frontend/` 的版本后，必须在启动服务前执行：
+
+```bash
+./scripts/build-frontend.sh
+```
+
+该脚本使用独立的 Node 20 Docker 容器执行 `npm ci` 和生产构建，不要求宿主机安装 Node.js。构建产物会写入 `gateway/static`，并由 gateway 通过只读挂载提供。构建完成后刷新管理后台；如果浏览器仍使用旧入口文件，执行一次强制刷新。
+
 ## SQLite 迁移到 PostgreSQL
 
 1. 对 SQLite 执行一致性备份并保存 `.env`、Compose 配置和当前 Git 版本。

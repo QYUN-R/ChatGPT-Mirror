@@ -1,4 +1,13 @@
 services:
+  frontend-builder:
+    image: node:20-alpine
+    profiles: ["frontend-build"]
+    working_dir: /workspace/frontend
+    command: ["sh", "-c", "npm ci && npm run build"]
+    volumes:
+      - ./:/workspace
+      - frontend-node-modules:/workspace/frontend/node_modules
+
   chatgpt-mirror:
     volumes:
       - ./data:/app/data
@@ -168,5 +177,6 @@ services:
       - chatgpt-network
 
 volumes:
+  frontend-node-modules:
   redis-data:
   postgres-data:
