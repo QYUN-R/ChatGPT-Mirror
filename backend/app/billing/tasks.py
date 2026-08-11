@@ -3,8 +3,10 @@ from django.conf import settings
 from django.core.mail import send_mail
 
 from app.billing.services import (
+    expire_pending_alipay_orders,
     expire_stale_reservations,
     maintain_subscriptions,
+    reconcile_pending_alipay_orders,
     refresh_pool_health,
     send_expiry_reminders,
 )
@@ -16,6 +18,20 @@ def expire_stale_reservations_task():
     if not settings.BILLING_ENABLED:
         return 0
     return expire_stale_reservations()
+
+
+@shared_task(name="app.billing.tasks.reconcile_pending_alipay_orders_task")
+def reconcile_pending_alipay_orders_task():
+    if not settings.BILLING_ENABLED:
+        return 0
+    return reconcile_pending_alipay_orders()
+
+
+@shared_task(name="app.billing.tasks.expire_pending_alipay_orders_task")
+def expire_pending_alipay_orders_task():
+    if not settings.BILLING_ENABLED:
+        return 0
+    return expire_pending_alipay_orders()
 
 
 @shared_task(name="app.billing.tasks.subscription_maintenance_task")

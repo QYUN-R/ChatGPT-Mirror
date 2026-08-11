@@ -37,6 +37,17 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    secrets:
+      - source: alipay_app_private_key
+        target: alipay_app_private_key
+        uid: "0"
+        gid: "0"
+        mode: 0400
+      - source: alipay_public_key
+        target: alipay_public_key
+        uid: "0"
+        gid: "0"
+        mode: 0444
 
   worker:
     image: chatgpt-mirror-commercial-backend:local
@@ -63,6 +74,17 @@ services:
     volumes:
       - ./backend/logs:/app/backend/logs
       - ./backend/db:/app/backend/db
+    secrets:
+      - source: alipay_app_private_key
+        target: alipay_app_private_key
+        uid: "0"
+        gid: "0"
+        mode: 0400
+      - source: alipay_public_key
+        target: alipay_public_key
+        uid: "0"
+        gid: "0"
+        mode: 0444
     depends_on:
       redis:
         condition: service_healthy
@@ -180,3 +202,9 @@ volumes:
   frontend-node-modules:
   redis-data:
   postgres-data:
+
+secrets:
+  alipay_app_private_key:
+    file: ./secrets/alipay_app_private_key.pem
+  alipay_public_key:
+    file: ./secrets/alipay_public_key.pem

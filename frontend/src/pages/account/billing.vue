@@ -57,6 +57,11 @@
           theme="info"
           :message="`已安排在当前周期结束后切换为 ${me.subscription.scheduled_plan_name}`"
         />
+        <t-alert
+          v-if="pendingAlipayOrder"
+          theme="info"
+          :message="`支付宝订单 ${pendingAlipayOrder.order_no} 正在等待官方确认，权益只会在服务器确认到账后开通。`"
+        />
       </section>
 
       <section class="plans-section">
@@ -65,10 +70,7 @@
             <h2>选择套餐</h2>
             <p>套餐价格和可购买状态由管理员配置</p>
           </div>
-          <t-radio-group v-model="period" variant="default-filled" size="small">
-            <t-radio-button value="monthly">月付</t-radio-button>
-            <t-radio-button value="quarterly" disabled>季付（待定价）</t-radio-button>
-          </t-radio-group>
+          <t-tag v-if="checkoutAvailable" theme="success" variant="light">支付宝安全支付</t-tag>
         </div>
         <div class="plan-grid">
           <article v-for="plan in plans" :key="plan.id" class="plan-panel" :class="{ current: isCurrent(plan) }">
@@ -77,11 +79,22 @@
                 <h3>{{ plan.name }}</h3>
                 <p>{{ plan.tagline }}</p>
               </div>
-              <div class="plan-price" v-if="monthlyOffer(plan)">
-                <strong>{{ formatMoney(monthlyOffer(plan).price_cents) }}</strong>
-                <span>/ 月</span>
+              <div class="plan-price" v-if="selectedOffer(plan)">
+                <strong>{{ formatMoney(selectedOffer(plan).price_cents) }}</strong>
+                <span>/ {{ selectedOffer(plan).name }}</span>
               </div>
             </div>
+            <t-radio-group
+              v-if="plan.offers?.length > 1"
+              v-model="selectedOfferIds[plan.id]"
+              class="offer-selector"
+              size="small"
+              variant="default-filled"
+            >
+              <t-radio-button v-for="offer in plan.offers" :key="offer.id" :value="offer.id">
+                {{ offer.name }} {{ formatMoney(offer.price_cents, offer.currency) }}
+              </t-radio-button>
+            </t-radio-group>
             <div class="plan-actions">
               <t-tag v-if="!checkoutAvailable" theme="warning" variant="light">支付筹备中</t-tag>
               <t-tag v-else-if="isCurrent(plan)" theme="success" variant="light">当前使用中</t-tag>
@@ -91,7 +104,7 @@
                 :theme="plan.pool_tier === 'PREMIUM' ? 'primary' : 'default'"
                 :variant="plan.pool_tier === 'PREMIUM' ? 'base' : 'outline'"
                 :loading="submittingPlanId === plan.id"
-                :disabled="!checkoutAvailable || !monthlyOffer(plan) || (!isCurrent(plan) && !plan.purchase_available)"
+                :disabled="!checkoutAvailable || !selectedOffer(plan) || (!isCurrent(plan) && !plan.purchase_available)"
                 @click="submitPlan(plan)"
               >
                 {{ actionLabel(plan) }}
@@ -111,11 +124,17 @@
         <div class="orders-table">
           <t-table :data="orders" :columns="orderColumns" row-key="id" :hover="true">
             <template #price="{ row }">{{ formatMoney(row.price_cents, row.currency) }}</template>
+            <template #provider="{ row }">{{ providerLabel(row.provider) }}</template>
             <template #status="{ row }">
               <t-tag :theme="statusTheme(row.status) as any" variant="light">{{ statusLabel(row.status) }}</t-tag>
             </template>
             <template #created_at="{ row }">{{ formatDateTime(row.created_at) }}</template>
             <template #paid_at="{ row }">{{ formatDateTime(row.paid_at) }}</template>
+            <template #op="{ row }">
+              <t-link v-if="row.provider === 'alipay' && row.status === 'PENDING'" theme="primary" @click="syncOrder(row)">
+                同步支付状态
+              </t-link>
+            </template>
           </t-table>
         </div>
         <div v-if="orders.length" class="order-card-list">
@@ -128,6 +147,9 @@
               <span>{{ formatMoney(order.price_cents, order.currency) }}</span>
               <t-tag :theme="statusTheme(order.status) as any" variant="light">{{ statusLabel(order.status) }}</t-tag>
             </div>
+            <t-link v-if="order.provider === 'alipay' && order.status === 'PENDING'" theme="primary" @click="syncOrder(order)">
+              同步支付状态
+            </t-link>
             <small>{{ formatDateTime(order.paid_at || order.created_at) }}</small>
           </article>
         </div>
@@ -149,22 +171,30 @@ const router = useRouter()
 const me = ref<any>(null)
 const plans = ref<any[]>([])
 const orders = ref<any[]>([])
-const period = ref('monthly')
+const selectedOfferIds = ref<Record<number, number>>({})
 const submittingPlanId = ref<number | null>(null)
 const checkoutAvailable = ref(false)
+const pendingAlipayOrder = ref<any>(null)
 
 const orderColumns = [
   { colKey: 'order_no', title: '订单号', width: 190 },
   { colKey: 'plan_name', title: '套餐', width: 130 },
   { colKey: 'order_type', title: '类型', width: 100 },
+  { colKey: 'provider', title: '渠道', cell: 'provider', width: 100 },
   { colKey: 'price', title: '金额', cell: 'price', width: 110 },
   { colKey: 'status', title: '状态', cell: 'status', width: 100 },
   { colKey: 'created_at', title: '下单时间', cell: 'created_at', width: 170 },
-  { colKey: 'paid_at', title: '支付时间', cell: 'paid_at', width: 170 }
+  { colKey: 'paid_at', title: '支付时间', cell: 'paid_at', width: 170 },
+  { colKey: 'op', title: '操作', cell: 'op', width: 130, fixed: 'right' }
 ]
 
-const monthlyOffer = (plan: any) => plan.offers?.find((offer: any) => offer.code === 'monthly' && !offer.is_draft)
 const isCurrent = (plan: any) => me.value?.subscription?.plan?.id === plan.id
+const selectedOffer = (plan: any) => {
+  const offers = plan.offers || []
+  const selectedId = Number(selectedOfferIds.value[plan.id])
+  return offers.find((offer: any) => offer.id === selectedId) || offers[0] || null
+}
+const providerLabel = (provider: string) => provider === 'alipay' ? '支付宝' : provider === 'manual' ? '人工' : provider === 'mock' ? '模拟' : provider
 
 const actionLabel = (plan: any) => {
   if (!checkoutAvailable.value) return '暂未开放购买'
@@ -185,15 +215,22 @@ const loadData = async () => {
     request('/0x/billing/orders?page_size=8')
   ])
   plans.value = planData?.plans || []
+  const nextOfferIds = { ...selectedOfferIds.value }
+  for (const plan of plans.value) {
+    const hasSelectedOffer = plan.offers?.some((offer: any) => offer.id === Number(nextOfferIds[plan.id]))
+    if (!hasSelectedOffer && plan.offers?.[0]) nextOfferIds[plan.id] = plan.offers[0].id
+  }
+  selectedOfferIds.value = nextOfferIds
   checkoutAvailable.value = Boolean(planData?.checkout_available)
   me.value = meData
   orders.value = orderData?.results || []
+  pendingAlipayOrder.value = orders.value.find((order: any) => order.provider === 'alipay' && order.status === 'PENDING') || null
   loading.value = false
 }
 
 const submitPlan = async (plan: any) => {
   if (!checkoutAvailable.value || !plan.purchase_available) return
-  const offer = monthlyOffer(plan)
+  const offer = selectedOffer(plan)
   if (!offer) return
   submittingPlanId.value = plan.id
   const data = await request('/0x/billing/orders', 'POST', {
@@ -203,13 +240,56 @@ const submitPlan = async (plan: any) => {
   })
   submittingPlanId.value = null
   if (!data?.order) return
-  MessagePlugin.success(data.order.status === 'PAID' ? '套餐已生效' : '订单已创建，等待管理员确认')
+  if (data.order.status === 'PAID') {
+    MessagePlugin.success('套餐已生效')
+    await loadData()
+    return
+  }
+  if (data.checkout?.provider === 'alipay' && data.checkout?.pay_url) {
+    sessionStorage.setItem('billing_pending_alipay_order_id', String(data.order.id))
+    window.location.assign(data.checkout.pay_url)
+    return
+  }
+  MessagePlugin.info('订单已创建，等待支付确认')
   await loadData()
+}
+
+const syncOrder = async (order: any, announce = true) => {
+  const data = await request(`/0x/billing/orders/${order.id}/sync-payment`, 'POST')
+  if (!data?.order) return null
+  const index = orders.value.findIndex((item: any) => item.id === data.order.id)
+  if (index >= 0) orders.value[index] = data.order
+  pendingAlipayOrder.value = orders.value.find((item: any) => item.provider === 'alipay' && item.status === 'PENDING') || null
+  if (announce && data.order.status === 'PAID') MessagePlugin.success('支付宝到账已确认，套餐已开通')
+  if (announce && data.order.status === 'CLOSED') MessagePlugin.warning('该支付宝订单已关闭')
+  return data.order
+}
+
+const reconcileReturnedPayment = async () => {
+  const orderId = Number(sessionStorage.getItem('billing_pending_alipay_order_id'))
+  if (!Number.isInteger(orderId) || orderId <= 0) return
+  let attempts = 0
+  const poll = async () => {
+    attempts += 1
+    const order = await syncOrder({ id: orderId }, attempts === 1)
+    if (!order || order.status === 'PAID' || order.status === 'CLOSED' || attempts >= 8) {
+      if (order?.status === 'PAID' || order?.status === 'CLOSED') {
+        sessionStorage.removeItem('billing_pending_alipay_order_id')
+        await loadData()
+      }
+      return
+    }
+    window.setTimeout(poll, 2500)
+  }
+  await poll()
 }
 
 const goSupport = () => router.push({ name: 'SupportCenter' })
 
-onMounted(loadData)
+onMounted(async () => {
+  await loadData()
+  await reconcileReturnedPayment()
+})
 </script>
 
 <style scoped>
@@ -232,7 +312,7 @@ onMounted(loadData)
 .empty-subscription span { margin-top: 6px; color: var(--app-text-muted); font-size: 13px; }
 .subscription-panel :deep(.t-alert) { margin-top: 14px; }
 .plan-grid { display: grid; min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.plan-panel { display: grid; min-width: 0; min-height: 210px; padding: 22px; border: 1px solid var(--app-border-strong); border-radius: 8px; }
+.plan-panel { display: grid; min-width: 0; min-height: 234px; padding: 22px; border: 1px solid var(--app-border-strong); border-radius: 8px; }
 .plan-panel.current { border-color: #91b7a0; box-shadow: inset 0 3px 0 #4f8061; }
 .plan-topline { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .plan-topline h3 { font-size: 20px; font-weight: 600; letter-spacing: 0; }
@@ -240,6 +320,7 @@ onMounted(loadData)
 .plan-price { display: flex; align-items: baseline; white-space: nowrap; }
 .plan-price strong { font-size: 29px; font-weight: 600; }
 .plan-price span { margin-left: 5px; color: var(--app-text-muted); font-size: 13px; }
+.offer-selector { margin-top: 18px; overflow-x: auto; white-space: nowrap; }
 .plan-actions { display: flex; align-items: center; justify-content: space-between; align-self: end; }
 .orders-table { min-width: 0; overflow-x: auto; }
 .order-card-list { display: none; }

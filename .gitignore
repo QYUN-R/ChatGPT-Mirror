@@ -5,6 +5,7 @@ backend/db/
 backend/logs/
 frontend/*.log
 .env
+secrets/
 backups/
 *.pyc
 __pycache__/

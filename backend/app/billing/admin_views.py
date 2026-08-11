@@ -2,6 +2,7 @@ from uuid import uuid4
 import time
 
 from django.shortcuts import get_object_or_404
+from django.db.models import Q
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
@@ -31,16 +32,19 @@ from app.billing.serializers import (
     SubscriptionSerializer,
 )
 from app.billing.services import (
+    close_provider_order,
     close_order,
     complete_order,
     create_order,
     ensure_assignment,
     publish_announcement,
+    reconcile_provider_order,
     refund_order,
     suspend_subscription,
 )
 from app.chatgpt.models import ChatgptAccount, ChatgptCar
 from app.page import DefaultPageNumberPagination
+from app.utils import get_client_ip
 
 
 def admin_error(error):
@@ -224,19 +228,27 @@ class AdminOrderView(APIView):
     permission_classes = (IsAuthenticated, IsAdminUser)
 
     def get(self, request):
-        queryset = Order.objects.select_related("user", "plan", "offer")
+        queryset = Order.objects.select_related("user", "plan", "offer").prefetch_related("transactions")
         status = request.query_params.get("status")
+        provider = request.query_params.get("provider")
+        keyword = str(request.query_params.get("q") or "").strip()
         if status:
             queryset = queryset.filter(status=status)
+        if provider:
+            queryset = queryset.filter(provider=provider)
+        if keyword:
+            queryset = queryset.filter(Q(user__username__icontains=keyword) | Q(order_no__icontains=keyword))
         pg = DefaultPageNumberPagination()
         page = pg.paginate_queryset(queryset, request=request)
-        return pg.get_paginated_response(OrderSerializer(page, many=True).data)
+        return pg.get_paginated_response(OrderSerializer(page, many=True, context={"admin": True}).data)
 
     def post(self, request):
         order = get_object_or_404(Order, pk=request.data.get("order_id"))
         action = request.data.get("action")
         try:
             if action == "mark_paid":
+                if order.provider == "alipay":
+                    raise BillingError("支付宝订单必须等待官方支付结果", code="manual_payment_not_allowed")
                 event = PaymentEvent(
                     event_id=str(request.data.get("event_id") or f"manual-{uuid4().hex}"),
                     event_type="PAYMENT_SUCCEEDED",
@@ -248,12 +260,18 @@ class AdminOrderView(APIView):
                 )
                 order, _ = complete_order(order, event, actor=request.user)
             elif action == "close":
-                order = close_order(order, actor=request.user)
+                order = (
+                    close_provider_order(order, actor=request.user, ip_address=get_client_ip(request))
+                    if order.provider == "alipay"
+                    else close_order(order, actor=request.user)
+                )
+            elif action == "sync":
+                order, _ = reconcile_provider_order(order, actor=request.user, ip_address=get_client_ip(request))
             elif action == "refund":
                 order = refund_order(order, actor=request.user)
             else:
                 raise ValidationError({"message": "未知操作"})
-            return Response({"order": OrderSerializer(order).data})
+            return Response({"order": OrderSerializer(order, context={"admin": True}).data})
         except BillingError as exc:
             admin_error(exc)
 

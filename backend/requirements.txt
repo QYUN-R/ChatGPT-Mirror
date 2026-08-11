@@ -2,7 +2,7 @@ asgiref==3.8.1
 certifi==2024.8.30
 charset-normalizer==3.3.2
 Django==5.1.1
-cryptography==43.0.3
+cryptography==50.0.0
 django-simpleui==2024.8.28
 djangorestframework==3.15.2
 idna==3.10
@@ -17,3 +17,4 @@ celery==5.4.0
 redis==5.2.1
 psycopg[binary]==3.2.3
 gunicorn==23.0.0
+python-alipay-sdk==3.4.0

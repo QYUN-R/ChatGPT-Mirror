@@ -5,6 +5,7 @@ from app.billing.models import (
     Announcement,
     AuditLog,
     Order,
+    PaymentTransaction,
     Plan,
     PlanOffer,
     PoolAccountPolicy,
@@ -134,6 +135,7 @@ class OrderSerializer(serializers.ModelSerializer):
     plan_name = serializers.CharField(source="plan.name", read_only=True)
     offer_name = serializers.CharField(source="offer.name", read_only=True)
     price_yuan = serializers.SerializerMethodField()
+    transactions = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -151,13 +153,45 @@ class OrderSerializer(serializers.ModelSerializer):
             "price_cents",
             "price_yuan",
             "currency",
+            "payment_expires_at",
             "created_at",
             "paid_at",
             "closed_at",
+            "provider_order_id",
+            "transactions",
         )
+
+    def get_fields(self):
+        fields = super().get_fields()
+        if not self.context.get("admin"):
+            fields.pop("provider_order_id", None)
+            fields.pop("transactions", None)
+        return fields
 
     def get_price_yuan(self, obj):
         return f"{obj.price_cents / 100:.2f}"
+
+    def get_transactions(self, obj):
+        return PaymentTransactionSerializer(obj.transactions.all(), many=True).data
+
+
+class PaymentTransactionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PaymentTransaction
+        fields = (
+            "id",
+            "provider",
+            "provider_transaction_id",
+            "event_id",
+            "event_type",
+            "amount_cents",
+            "currency",
+            "signature_verified",
+            "accepted",
+            "payload",
+            "occurred_at",
+            "created_at",
+        )
 
 
 class PoolPolicySerializer(serializers.ModelSerializer):

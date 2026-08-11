@@ -217,12 +217,19 @@ class Order(TimestampedModel):
     offer_snapshot = models.JSONField(default=dict)
     price_cents = models.PositiveBigIntegerField()
     currency = models.CharField(max_length=8, default="CNY")
+    payment_expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
     paid_at = models.DateTimeField(null=True, blank=True)
     closed_at = models.DateTimeField(null=True, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:
         ordering = ("-created_at", "-id")
+        indexes = [
+            models.Index(
+                fields=("provider", "status", "payment_expires_at"),
+                name="billing_order_pay_state_ix",
+            ),
+        ]
 
     def __str__(self):
         return self.order_no

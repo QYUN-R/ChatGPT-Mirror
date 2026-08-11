@@ -32,7 +32,12 @@ from app.billing.models import (
     UsageResult,
     UserNotification,
 )
-from app.billing.payment import PaymentEvent
+from app.billing.payment import (
+    ALIPAY_CLOSED_STATUSES,
+    ALIPAY_SUCCESS_STATUSES,
+    PaymentEvent,
+    get_payment_provider,
+)
 from app.billing.selectors import CAPACITY_STATUSES, capacity_snapshot
 from app.chatgpt.models import ChatgptAccount
 
@@ -53,12 +58,15 @@ def add_months(value, months):
     return value.replace(year=year, month=month, day=day)
 
 
-def audit(action, target, *, actor=None, detail=None, ip_address=None):
+def audit(action, target=None, *, actor=None, detail=None, ip_address=None, target_type=None, target_id=None):
+    if target is not None:
+        target_type = target_type or target.__class__.__name__
+        target_id = target_id if target_id is not None else str(getattr(target, "pk", "") or "")
     return AuditLog.objects.create(
         actor=actor,
         action=action,
-        target_type=target.__class__.__name__,
-        target_id=str(getattr(target, "pk", "") or ""),
+        target_type=target_type or "Unknown",
+        target_id=str(target_id or ""),
         detail=detail or {},
         ip_address=ip_address,
     )
@@ -66,9 +74,12 @@ def audit(action, target, *, actor=None, detail=None, ip_address=None):
 
 def _sanitize_payment_payload(value):
     blocked_fragments = ("secret", "token", "cookie", "password", "signature", "private_key")
+    blocked_keys = {"sign", "sign_type", "app_auth_token", "auth_token"}
     if isinstance(value, dict):
         return {
-            str(key): "[redacted]" if any(fragment in str(key).lower() for fragment in blocked_fragments) else _sanitize_payment_payload(item)
+            str(key): "[redacted]"
+            if str(key).lower() in blocked_keys or any(fragment in str(key).lower() for fragment in blocked_fragments)
+            else _sanitize_payment_payload(item)
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -256,6 +267,7 @@ def _determine_order_type(subscription, target_plan):
 
 @transaction.atomic
 def create_order(user, offer, *, provider="mock", idempotency_key=None, actor=None, metadata=None):
+    provider = str(provider or "manual").strip().lower()
     if not isinstance(offer, PlanOffer):
         offer = PlanOffer.objects.select_related("plan", "plan__pool").get(pk=offer)
     else:
@@ -269,6 +281,20 @@ def create_order(user, offer, *, provider="mock", idempotency_key=None, actor=No
         if existing:
             if existing.user_id != user.id:
                 raise BillingError("幂等键已被其他订单使用", code="idempotency_conflict")
+            return existing
+    if provider == "alipay":
+        existing = (
+            Order.objects.filter(
+                user=user,
+                offer=offer,
+                provider="alipay",
+                status=OrderStatus.PENDING,
+                payment_expires_at__gt=timezone.now(),
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        if existing:
             return existing
 
     subscription = refresh_subscription_state(user)
@@ -297,6 +323,11 @@ def create_order(user, offer, *, provider="mock", idempotency_key=None, actor=No
         },
         price_cents=offer.price_cents,
         currency=offer.currency,
+        payment_expires_at=(
+            timezone.now() + timedelta(minutes=max(int(settings.BILLING_ORDER_HOLD_MINUTES), 1))
+            if provider == "alipay"
+            else None
+        ),
         metadata=metadata or {},
     )
     if order_type != OrderType.RENEW:
@@ -418,7 +449,7 @@ def _apply_paid_order(order):
     return subscription
 
 
-def complete_order(order, event: PaymentEvent, *, actor=None):
+def complete_order(order, event: PaymentEvent, *, actor=None, ip_address=None):
     rejection = None
     subscription = None
     provider_transaction_id = str(event.provider_transaction_id or "").strip()
@@ -520,10 +551,88 @@ def complete_order(order, event: PaymentEvent, *, actor=None):
                         title="套餐已开通",
                         content=f"{order.plan.name}已开通，有效期至 {timezone.localtime(subscription.ends_at):%Y-%m-%d %H:%M}。",
                     )
-                    audit("order.paid", order, actor=actor, detail={"event_id": event.event_id})
+                    audit("order.paid", order, actor=actor, detail={"event_id": event.event_id}, ip_address=ip_address)
     if rejection:
         raise rejection
     return order, subscription
+
+
+def reconcile_provider_order(order, *, actor=None, ip_address=None):
+    """Reconcile one provider order without trusting any browser redirect."""
+    order = Order.objects.select_related("user", "plan", "offer").get(pk=order.pk)
+    provider = get_payment_provider(order.provider)
+    if provider is None or order.provider != "alipay":
+        raise BillingError("该订单不支持渠道查单", code="payment_sync_not_supported")
+
+    result = provider.query_order(order)
+    detail = {
+        "provider": order.provider,
+        "trade_status": result.trade_status,
+        "provider_transaction_id": result.provider_transaction_id,
+        "successful_response": result.successful_response,
+    }
+    if not result.successful_response:
+        if result.payload.get("sub_code") != "ACQ.TRADE_NOT_EXIST":
+            audit("payment.reconcile_no_result", order, actor=actor, detail=detail, ip_address=ip_address)
+        return order, None
+    if result.order_no != order.order_no:
+        audit("payment.reconcile_order_mismatch", order, actor=actor, detail=detail, ip_address=ip_address)
+        raise PaymentRejected("支付宝订单号不匹配", code="payment_order_mismatch")
+    if result.trade_status in ALIPAY_SUCCESS_STATUSES:
+        event = PaymentEvent(
+            event_id=f"alipay:{result.provider_transaction_id}:{result.trade_status}",
+            event_type="PAYMENT_SUCCEEDED",
+            provider_transaction_id=result.provider_transaction_id,
+            amount_cents=result.amount_cents,
+            currency=result.currency,
+            signature_verified=True,
+            occurred_at=timezone.now(),
+            payload=result.payload,
+            order_no=result.order_no,
+            app_id=result.app_id,
+        )
+        order, subscription = complete_order(order, event, actor=actor, ip_address=ip_address)
+        audit("payment.reconciled_paid", order, actor=actor, detail=detail, ip_address=ip_address)
+        return order, subscription
+    if result.trade_status in ALIPAY_CLOSED_STATUSES:
+        order = close_order(order, actor=actor)
+        audit("payment.reconciled_closed", order, actor=actor, detail=detail, ip_address=ip_address)
+        return order, None
+    audit("payment.reconciled_pending", order, actor=actor, detail=detail, ip_address=ip_address)
+    return order, None
+
+
+def close_provider_order(order, *, actor=None, ip_address=None):
+    """Close an unpaid Alipay order only after checking that it was not paid."""
+    order = Order.objects.select_related("user", "plan", "offer").get(pk=order.pk)
+    if order.provider != "alipay":
+        return close_order(order, actor=actor)
+    if order.status != OrderStatus.PENDING:
+        return order
+
+    reconciled_order, _ = reconcile_provider_order(order, actor=actor, ip_address=ip_address)
+    if reconciled_order.status != OrderStatus.PENDING:
+        return reconciled_order
+
+    provider = get_payment_provider("alipay")
+    result = provider.close_order(reconciled_order)
+    if not result.get("closed"):
+        if result.get("payload", {}).get("sub_code") == "ACQ.TRADE_NOT_EXIST":
+            return close_order(reconciled_order, actor=actor)
+        audit(
+            "payment.close_failed",
+            reconciled_order,
+            actor=actor,
+            detail={"provider": "alipay", "result": _sanitize_payment_payload(result.get("payload", {}))},
+            ip_address=ip_address,
+        )
+        reconciled_order, _ = reconcile_provider_order(reconciled_order, actor=actor, ip_address=ip_address)
+        if reconciled_order.status != OrderStatus.PENDING:
+            return reconciled_order
+        raise PaymentRejected("支付宝订单暂时无法关闭", code="payment_close_failed")
+    closed = close_order(reconciled_order, actor=actor)
+    audit("payment.closed", closed, actor=actor, detail={"provider": "alipay"}, ip_address=ip_address)
+    return closed
 
 
 @transaction.atomic
@@ -549,6 +658,8 @@ def close_order(order, *, actor=None):
 @transaction.atomic
 def refund_order(order, *, actor=None, event_id=None):
     order = Order.objects.select_for_update().select_related("user").get(pk=order.pk)
+    if order.provider == "alipay":
+        raise BillingError("支付宝线上退款暂未开放，请走人工售后流程", code="refund_not_supported")
     if order.status == OrderStatus.REFUNDED:
         return order
     if order.status != OrderStatus.PAID:
@@ -793,6 +904,48 @@ def expire_stale_reservations():
         updated_at=now,
     )
     return count
+
+
+def reconcile_pending_alipay_orders():
+    now = timezone.now()
+    processed = 0
+    queryset = (
+        Order.objects.filter(
+            provider="alipay",
+            status=OrderStatus.PENDING,
+            payment_expires_at__isnull=False,
+            payment_expires_at__gt=now,
+        )
+        .order_by("created_at")[: max(int(settings.ALIPAY_RECONCILE_BATCH_SIZE), 1)]
+    )
+    for order in queryset:
+        try:
+            reconcile_provider_order(order)
+            processed += 1
+        except BillingError as exc:
+            audit("payment.reconcile_failed", order, detail={"code": exc.code})
+    return processed
+
+
+def expire_pending_alipay_orders():
+    now = timezone.now()
+    processed = 0
+    queryset = (
+        Order.objects.filter(
+            provider="alipay",
+            status=OrderStatus.PENDING,
+            payment_expires_at__isnull=False,
+            payment_expires_at__lte=now,
+        )
+        .order_by("payment_expires_at")[: max(int(settings.ALIPAY_RECONCILE_BATCH_SIZE), 1)]
+    )
+    for order in queryset:
+        try:
+            close_provider_order(order)
+            processed += 1
+        except BillingError as exc:
+            audit("payment.expire_close_failed", order, detail={"code": exc.code})
+    return processed
 
 
 def maintain_subscriptions():

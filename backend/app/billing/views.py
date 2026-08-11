@@ -1,6 +1,7 @@
 from uuid import uuid4
 
 from django.conf import settings
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
@@ -10,7 +11,7 @@ from rest_framework.views import APIView
 
 from app.billing.exceptions import BillingError
 from app.billing.models import Order, Plan, PlanOffer, SupportContact, UserNotification
-from app.billing.payment import PaymentEvent, get_checkout_provider
+from app.billing.payment import ALIPAY_CLOSED_STATUSES, PaymentEvent, get_checkout_provider, get_payment_provider
 from app.billing.selectors import current_subscription, usage_snapshot
 from app.billing.serializers import (
     NotificationSerializer,
@@ -19,7 +20,16 @@ from app.billing.serializers import (
     SupportContactSerializer,
     SubscriptionSerializer,
 )
-from app.billing.services import active_subscription, complete_order, create_order, refresh_subscription_state
+from app.billing.services import (
+    active_subscription,
+    audit,
+    close_order,
+    complete_order,
+    create_order,
+    reconcile_provider_order,
+    refresh_subscription_state,
+)
+from app.utils import get_client_ip
 from app.page import DefaultPageNumberPagination
 
 
@@ -136,6 +146,103 @@ class OrderRenewView(APIView):
             return Response({"order": OrderSerializer(order).data, "checkout": provider.create_order(order)})
         except BillingError as exc:
             raise_api_error(exc)
+
+
+class OrderPaymentSyncView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request, order_id):
+        order = get_object_or_404(Order, pk=order_id, user=request.user)
+        try:
+            order, subscription = reconcile_provider_order(
+                order,
+                actor=request.user,
+                ip_address=get_client_ip(request),
+            )
+            return Response({
+                "order": OrderSerializer(order).data,
+                "subscription": SubscriptionSerializer(subscription).data if subscription else None,
+            })
+        except BillingError as exc:
+            raise_api_error(exc)
+
+
+class AlipayNotifyView(APIView):
+    authentication_classes = ()
+    permission_classes = ()
+
+    def _failure(self, status=400):
+        return HttpResponse("failure", content_type="text/plain; charset=utf-8", status=status)
+
+    def post(self, request):
+        try:
+            content_length = int(request.META.get("CONTENT_LENGTH") or 0)
+        except (TypeError, ValueError):
+            return self._failure()
+        if content_length > settings.PAYMENT_WEBHOOK_MAX_BODY_BYTES:
+            return self._failure(status=413)
+
+        provider = get_payment_provider("alipay")
+        if provider is None or not provider.is_configured():
+            return self._failure(status=503)
+        ip_address = get_client_ip(request)
+        try:
+            event = provider.verify_callback(request.data, headers=request.headers)
+        except BillingError as exc:
+            audit(
+                "payment.callback_rejected",
+                detail={"reason": exc.code, "provider": "alipay"},
+                ip_address=ip_address,
+                target_type="AlipayCallback",
+            )
+            return self._failure()
+        if not event.signature_verified or event.app_id != settings.ALIPAY_APP_ID:
+            audit(
+                "payment.callback_rejected",
+                detail={"reason": "invalid_signature", "provider": "alipay"},
+                ip_address=ip_address,
+                target_type="AlipayCallback",
+                target_id=event.order_no,
+            )
+            return self._failure()
+        order = (
+            Order.objects.select_related("user", "plan", "offer")
+            .filter(order_no=event.order_no, provider="alipay")
+            .first()
+        )
+        if order is None:
+            audit(
+                "payment.callback_rejected",
+                detail={"reason": "unknown_order", "provider": "alipay"},
+                ip_address=ip_address,
+                target_type="AlipayCallback",
+                target_id=event.order_no,
+            )
+            return self._failure()
+        try:
+            if event.event_type == "PAYMENT_SUCCEEDED":
+                complete_order(order, event, ip_address=ip_address)
+                audit("payment.callback_accepted", order, detail={"provider": "alipay"}, ip_address=ip_address)
+            elif str(event.payload.get("trade_status") or "").upper() in ALIPAY_CLOSED_STATUSES:
+                close_order(order)
+                audit("payment.callback_closed", order, detail={"provider": "alipay"}, ip_address=ip_address)
+            else:
+                audit(
+                    "payment.callback_rejected",
+                    order,
+                    detail={"reason": "unsupported_trade_status", "provider": "alipay"},
+                    ip_address=ip_address,
+                )
+                return self._failure()
+        except BillingError as exc:
+            audit(
+                "payment.callback_rejected",
+                order,
+                detail={"reason": exc.code, "provider": "alipay"},
+                ip_address=ip_address,
+            )
+            return self._failure()
+        return HttpResponse("success", content_type="text/plain; charset=utf-8")
 
 
 class OrderMockPayView(APIView):

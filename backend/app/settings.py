@@ -299,6 +299,23 @@ PAYMENT_CALLBACK_LOCK_ENABLED = env_bool(
     "PAYMENT_CALLBACK_LOCK_ENABLED",
     DJANGO_ENV == "PRODUCTION",
 )
+PAYMENT_WEBHOOK_MAX_BODY_BYTES = int(os.environ.get("PAYMENT_WEBHOOK_MAX_BODY_BYTES", "65536"))
+
+# Alipay credentials are file paths mounted read-only inside server containers.
+# Key material must never be placed in database rows, API responses, or frontend bundles.
+ALIPAY_ENV = os.environ.get("ALIPAY_ENV", "production").strip().lower()
+if ALIPAY_ENV not in {"production", "sandbox"}:
+    raise RuntimeError("ALIPAY_ENV must be production or sandbox")
+ALIPAY_APP_ID = os.environ.get("ALIPAY_APP_ID", "").strip()
+ALIPAY_APP_PRIVATE_KEY_PATH = os.environ.get("ALIPAY_APP_PRIVATE_KEY_PATH", "").strip()
+ALIPAY_PUBLIC_KEY_PATH = os.environ.get("ALIPAY_PUBLIC_KEY_PATH", "").strip()
+ALIPAY_NOTIFY_URL = os.environ.get("ALIPAY_NOTIFY_URL", "").strip()
+ALIPAY_RETURN_URL = os.environ.get("ALIPAY_RETURN_URL", "").strip()
+ALIPAY_SIGN_TYPE = os.environ.get("ALIPAY_SIGN_TYPE", "RSA2").strip().upper()
+if ALIPAY_SIGN_TYPE != "RSA2":
+    raise RuntimeError("ALIPAY_SIGN_TYPE must be RSA2")
+ALIPAY_HTTP_TIMEOUT_SECONDS = int(os.environ.get("ALIPAY_HTTP_TIMEOUT_SECONDS", "15"))
+ALIPAY_RECONCILE_BATCH_SIZE = int(os.environ.get("ALIPAY_RECONCILE_BATCH_SIZE", "50"))
 
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/1")
@@ -321,6 +338,14 @@ CELERY_BEAT_SCHEDULE = {
     "billing-account-health-every-fifteen-minutes": {
         "task": "app.billing.tasks.account_health_task",
         "schedule": 900.0,
+    },
+    "billing-reconcile-pending-alipay-every-two-minutes": {
+        "task": "app.billing.tasks.reconcile_pending_alipay_orders_task",
+        "schedule": 120.0,
+    },
+    "billing-expire-alipay-orders-every-two-minutes": {
+        "task": "app.billing.tasks.expire_pending_alipay_orders_task",
+        "schedule": 120.0,
     },
 }
 
