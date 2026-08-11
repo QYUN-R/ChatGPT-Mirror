@@ -16,6 +16,7 @@ from app.billing.exceptions import BillingError, CapacityUnavailable, PaymentRej
 from app.billing.models import (
     AccountAssignment,
     AccountAssignmentEvent,
+    Order,
     OrderStatus,
     PaymentTransaction,
     Plan,
@@ -442,6 +443,7 @@ class BillingServiceTests(TestCase):
     BILLING_ENABLED=True,
     BILLING_ENFORCE_SUBSCRIPTION=True,
     BILLING_MOCK_PAYMENTS=True,
+    PAYMENT_PROVIDER="mock",
     BILLING_ORDER_HOLD_MINUTES=30,
 )
 class BillingApiTests(TestCase):
@@ -497,6 +499,23 @@ class BillingApiTests(TestCase):
         me = self.client.get("/0x/billing/me")
         self.assertTrue(me.data["service_available"])
         self.assertEqual(me.data["subscription"]["plan"]["name"], "普通套餐")
+
+    @override_settings(BILLING_MOCK_PAYMENTS=False, PAYMENT_PROVIDER="manual")
+    def test_user_checkout_is_rejected_without_a_configured_payment_provider(self):
+        self.client.force_authenticate(self.user)
+
+        response = self.client.post(
+            "/0x/billing/orders",
+            {"offer_id": self.offer.id, "idempotency_key": "unconfigured-checkout"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "checkout_unavailable")
+        self.assertFalse(Order.objects.filter(user=self.user).exists())
+        self.assertFalse(self.user.pool_reservations.exists())
+        plans = self.client.get("/0x/billing/plans")
+        self.assertFalse(plans.data["checkout_available"])
 
     def test_admin_manual_grant_and_user_list_show_plan(self):
         self.client.force_authenticate(self.admin)

@@ -91,13 +91,14 @@
               </div>
             </dl>
             <div class="plan-actions">
-              <t-tag v-if="isCurrent(plan)" theme="success" variant="light">当前使用中</t-tag>
+              <t-tag v-if="!checkoutAvailable" theme="warning" variant="light">支付筹备中</t-tag>
+              <t-tag v-else-if="isCurrent(plan)" theme="success" variant="light">当前使用中</t-tag>
               <span v-else></span>
               <t-button
                 :theme="plan.pool_tier === 'PREMIUM' ? 'primary' : 'default'"
                 :variant="plan.pool_tier === 'PREMIUM' ? 'base' : 'outline'"
                 :loading="submittingPlanId === plan.id"
-                :disabled="!monthlyOffer(plan) || (!isCurrent(plan) && plan.capacity.is_full)"
+                :disabled="!checkoutAvailable || !monthlyOffer(plan) || (!isCurrent(plan) && plan.capacity.is_full)"
                 @click="submitPlan(plan)"
               >
                 {{ actionLabel(plan) }}
@@ -155,6 +156,7 @@ const plans = ref<any[]>([])
 const orders = ref<any[]>([])
 const period = ref('monthly')
 const submittingPlanId = ref<number | null>(null)
+const checkoutAvailable = ref(false)
 
 const orderColumns = [
   { colKey: 'order_no', title: '订单号', width: 190 },
@@ -170,6 +172,7 @@ const monthlyOffer = (plan: any) => plan.offers?.find((offer: any) => offer.code
 const isCurrent = (plan: any) => me.value?.subscription?.plan?.id === plan.id
 
 const actionLabel = (plan: any) => {
+  if (!checkoutAvailable.value) return '暂未开放购买'
   const current = me.value?.subscription?.plan
   if (!current) return '立即开通'
   if (current.id === plan.id) return '续费'
@@ -186,12 +189,14 @@ const loadData = async () => {
     request('/0x/billing/orders?page_size=8')
   ])
   plans.value = planData?.plans || []
+  checkoutAvailable.value = Boolean(planData?.checkout_available)
   me.value = meData
   orders.value = orderData?.results || []
   loading.value = false
 }
 
 const submitPlan = async (plan: any) => {
+  if (!checkoutAvailable.value) return
   const offer = monthlyOffer(plan)
   if (!offer) return
   submittingPlanId.value = plan.id

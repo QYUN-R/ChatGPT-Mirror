@@ -8,6 +8,7 @@
 BILLING_ENABLED=true
 BILLING_ENFORCE_SUBSCRIPTION=false
 BILLING_MOCK_PAYMENTS=false
+PAYMENT_PROVIDER=manual
 DATABASE_ENGINE=postgres
 PAYMENT_CALLBACK_LOCK_ENABLED=true
 PAYMENT_CALLBACK_MAX_AGE_SECONDS=900
@@ -15,6 +16,12 @@ PAYMENT_CALLBACK_MAX_FUTURE_SKEW_SECONDS=300
 ```
 
 `BILLING_ENFORCE_SUBSCRIPTION=false` 用于兼容已有用户。确认旧用户迁移完成后，才评估是否改为强制套餐。
+
+## 在线支付开关
+
+生产环境在尚未接入支付渠道时必须保持 `PAYMENT_PROVIDER=manual`。此时普通用户不能创建占用号池席位的待支付订单，只有管理员可以通过订阅后台手动开通或续期。
+
+本地开发可同时设置 `BILLING_MOCK_PAYMENTS=true` 和 `PAYMENT_PROVIDER=mock` 来测试完整下单链路。真实支付适配器接入并完成回调验签后，再将 `PAYMENT_PROVIDER` 切换为对应渠道代码；不要在生产环境启用 mock 支付。
 
 ## 前端构建与发布
 

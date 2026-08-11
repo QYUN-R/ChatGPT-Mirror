@@ -10,7 +10,7 @@ from rest_framework.views import APIView
 
 from app.billing.exceptions import BillingError
 from app.billing.models import Order, Plan, PlanOffer, UserNotification
-from app.billing.payment import PaymentEvent, get_payment_provider
+from app.billing.payment import PaymentEvent, get_checkout_provider
 from app.billing.selectors import current_subscription, usage_snapshot
 from app.billing.serializers import (
     NotificationSerializer,
@@ -32,6 +32,7 @@ class PlanListView(APIView):
     def get(self, request):
         if not settings.BILLING_ENABLED:
             return Response({"enabled": False, "plans": []})
+        checkout_provider = get_checkout_provider()
         queryset = Plan.objects.select_related("pool").prefetch_related("offers").filter(
             is_active=True,
             is_public=True,
@@ -40,6 +41,7 @@ class PlanListView(APIView):
         return Response({
             "enabled": True,
             "mock_payments": bool(settings.BILLING_MOCK_PAYMENTS),
+            "checkout_available": bool(checkout_provider),
             "plans": PlanSerializer(queryset, many=True).data,
         })
 
@@ -74,20 +76,22 @@ class OrderListCreateView(APIView):
     def post(self, request):
         if not settings.BILLING_ENABLED:
             raise ValidationError({"message": "套餐功能尚未启用", "code": "billing_disabled"})
+        provider = get_checkout_provider()
+        if not provider:
+            raise ValidationError({
+                "message": "在线支付尚未配置，请联系管理员手动开通套餐",
+                "code": "checkout_unavailable",
+            })
         offer = get_object_or_404(PlanOffer.objects.select_related("plan", "plan__pool"), pk=request.data.get("offer_id"))
-        provider_code = "mock" if settings.BILLING_MOCK_PAYMENTS else "manual"
         try:
             order = create_order(
                 request.user,
                 offer,
-                provider=provider_code,
+                provider=provider.code,
                 idempotency_key=str(request.data.get("idempotency_key") or "").strip() or None,
                 metadata={"source": "user_portal"},
             )
-            checkout = None
-            provider = get_payment_provider(provider_code)
-            if provider:
-                checkout = provider.create_order(order)
+            checkout = provider.create_order(order)
             if request.data.get("pay_now") and settings.BILLING_MOCK_PAYMENTS:
                 event = PaymentEvent(
                     event_id=f"mock-{uuid4().hex}",
@@ -109,6 +113,12 @@ class OrderRenewView(APIView):
 
     def post(self, request, order_id):
         source_order = get_object_or_404(Order, pk=order_id, user=request.user)
+        provider = get_checkout_provider()
+        if not provider:
+            raise ValidationError({
+                "message": "在线支付尚未配置，请联系管理员手动续费",
+                "code": "checkout_unavailable",
+            })
         offer_id = request.data.get("offer_id") or source_order.offer_id
         offer = get_object_or_404(PlanOffer.objects.select_related("plan", "plan__pool"), pk=offer_id)
         subscription = active_subscription(request.user)
@@ -118,11 +128,11 @@ class OrderRenewView(APIView):
             order = create_order(
                 request.user,
                 offer,
-                provider="mock" if settings.BILLING_MOCK_PAYMENTS else "manual",
+                provider=provider.code,
                 idempotency_key=str(request.data.get("idempotency_key") or "").strip() or None,
                 metadata={"source": "renew", "source_order_id": source_order.id},
             )
-            return Response({"order": OrderSerializer(order).data})
+            return Response({"order": OrderSerializer(order).data, "checkout": provider.create_order(order)})
         except BillingError as exc:
             raise_api_error(exc)
 

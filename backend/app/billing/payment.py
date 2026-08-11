@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
+from django.conf import settings
 from django.utils import timezone
 
 
@@ -85,3 +86,13 @@ PROVIDERS = {
 
 def get_payment_provider(code):
     return PROVIDERS.get(str(code or "").lower())
+
+
+def get_checkout_provider():
+    """Return a user-facing payment provider only when checkout is explicitly enabled."""
+    provider = get_payment_provider(getattr(settings, "PAYMENT_PROVIDER", "manual"))
+    if provider is None:
+        return None
+    if provider.code == MockPaymentProvider.code and not settings.BILLING_MOCK_PAYMENTS:
+        return None
+    return provider
