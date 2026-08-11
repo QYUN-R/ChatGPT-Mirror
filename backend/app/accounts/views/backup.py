@@ -1,6 +1,7 @@
 import json
 import time
 
+from django.core import serializers as django_serializers
 from django.db import transaction
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
@@ -11,6 +12,38 @@ from app.accounts.models import User, VisitLog
 from app.chatgpt.models import ChatgptAccount, ChatgptCar
 from app.fields import decrypt_value, encrypt_value
 from app.utils import req_gateway
+from app.billing.models import (
+    AccountAssignment,
+    AccountAssignmentEvent,
+    Announcement,
+    AuditLog,
+    Order,
+    PaymentTransaction,
+    Plan,
+    PlanOffer,
+    PoolAccountPolicy,
+    PoolReservation,
+    Subscription,
+    UsageEvent,
+    UserNotification,
+)
+
+
+BILLING_BACKUP_MODELS = (
+    Plan,
+    PlanOffer,
+    Subscription,
+    Order,
+    PaymentTransaction,
+    PoolAccountPolicy,
+    PoolReservation,
+    AccountAssignment,
+    AccountAssignmentEvent,
+    UsageEvent,
+    Announcement,
+    UserNotification,
+    AuditLog,
+)
 
 
 class UnifiedBackupView(APIView):
@@ -18,7 +51,7 @@ class UnifiedBackupView(APIView):
 
     def get(self, request):
         payload = {
-            "version": 1,
+            "version": 2,
             "created_at": int(time.time()),
             "users": [
                 {
@@ -41,13 +74,15 @@ class UnifiedBackupView(APIView):
             "chatgpt_accounts": [
                 {
                     "id": account.id,
+                    "archived_at": account.archived_at.isoformat() if account.archived_at else None,
                     **{
                         field: getattr(account, field)
                         for field in (
                         "chatgpt_username", "auth_status", "plan_type", "access_token",
                         "session_token", "extra_cookies", "refresh_token", "refresh_client_id",
                         "access_token_valid", "session_token_valid", "proxy_node_id",
-                        "last_check_at", "last_error", "remark", "created_time", "updated_time",
+                        "last_check_at", "last_error", "remark", "is_archived",
+                        "created_time", "updated_time",
                         )
                     },
                 }
@@ -65,6 +100,10 @@ class UnifiedBackupView(APIView):
                 )
             ),
             "gateway": req_gateway("get", "/api/backup/export"),
+            "billing": {
+                model._meta.label: django_serializers.serialize("json", model.objects.all())
+                for model in BILLING_BACKUP_MODELS
+            },
         }
         archive = encrypt_value(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         response = Response({"archive": archive})
@@ -81,7 +120,7 @@ class UnifiedBackupView(APIView):
             payload = json.loads(decrypt_value(archive))
         except Exception:
             raise ValidationError({"archive": "备份文件无效或加密密钥不匹配"})
-        if payload.get("version") != 1:
+        if payload.get("version") not in (1, 2):
             raise ValidationError({"archive": "不支持的备份版本"})
 
         with transaction.atomic():
@@ -103,5 +142,11 @@ class UnifiedBackupView(APIView):
             for data in payload.get("visit_logs", []):
                 log_id = data.pop("id")
                 VisitLog.objects.update_or_create(id=log_id, defaults=data)
+            for model in BILLING_BACKUP_MODELS:
+                serialized = (payload.get("billing") or {}).get(model._meta.label)
+                if not serialized:
+                    continue
+                for item in django_serializers.deserialize("json", serialized):
+                    item.save()
             req_gateway("post", "/api/backup/restore", json=payload.get("gateway") or {})
         return Response({"message": "统一备份恢复完成；现有会话未恢复，请重新登录"})

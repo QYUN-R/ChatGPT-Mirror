@@ -23,6 +23,7 @@ class ShowUserAccountModelSerializer(serializers.ModelSerializer):
     date_joined = serializers.DateTimeField(format="%Y-%m-%d %H:%M")
     use_count = serializers.SerializerMethodField()
     chatgpt_count = serializers.SerializerMethodField()
+    subscription = serializers.SerializerMethodField()
 
     def __init__(self, *args, use_count_dict=dict, **kwargs):
         super().__init__(*args, **kwargs)
@@ -33,6 +34,18 @@ class ShowUserAccountModelSerializer(serializers.ModelSerializer):
 
     def get_use_count(self, obj):
         return self.use_count_dict.get(obj.username, 0)
+
+    def get_subscription(self, obj):
+        try:
+            subscription = obj.billing_subscription
+        except Exception:
+            return None
+        return {
+            "id": subscription.id,
+            "plan_name": subscription.plan.name,
+            "status": subscription.status,
+            "ends_at": subscription.ends_at,
+        }
 
     class Meta:
         model = User
@@ -88,7 +101,14 @@ class BatchUserActionSerializer(serializers.Serializer):
 class UserRegisterSerializer(serializers.Serializer):
     username = serializers.CharField(min_length=4)
     password = serializers.CharField()
-    chatgpt_token = serializers.CharField()
+    chatgpt_token = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        from django.conf import settings
+
+        if not settings.BILLING_ENABLED and not (attrs.get("chatgpt_token") or "").strip():
+            raise serializers.ValidationError({"chatgpt_token": "上游账号令牌不能为空"})
+        return attrs
 
     def validate_password(self, value):
         try:

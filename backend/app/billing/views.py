@@ -1,0 +1,182 @@
+from uuid import uuid4
+
+from django.conf import settings
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from rest_framework.exceptions import ValidationError
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from app.billing.exceptions import BillingError
+from app.billing.models import Order, Plan, PlanOffer, UserNotification
+from app.billing.payment import PaymentEvent, get_payment_provider
+from app.billing.selectors import current_subscription, usage_snapshot
+from app.billing.serializers import (
+    NotificationSerializer,
+    OrderSerializer,
+    PlanSerializer,
+    SubscriptionSerializer,
+)
+from app.billing.services import active_subscription, complete_order, create_order, refresh_subscription_state
+from app.page import DefaultPageNumberPagination
+
+
+def raise_api_error(error):
+    raise ValidationError({"message": error.message, "code": error.code})
+
+
+class PlanListView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request):
+        if not settings.BILLING_ENABLED:
+            return Response({"enabled": False, "plans": []})
+        queryset = Plan.objects.select_related("pool").prefetch_related("offers").filter(
+            is_active=True,
+            is_public=True,
+            is_archived=False,
+        )
+        return Response({
+            "enabled": True,
+            "mock_payments": bool(settings.BILLING_MOCK_PAYMENTS),
+            "plans": PlanSerializer(queryset, many=True).data,
+        })
+
+
+class BillingMeView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request):
+        subscription = refresh_subscription_state(request.user) if settings.BILLING_ENABLED else None
+        return Response({
+            "enabled": bool(settings.BILLING_ENABLED),
+            "enforced": bool(settings.BILLING_ENFORCE_SUBSCRIPTION),
+            "subscription": SubscriptionSerializer(subscription).data if subscription else None,
+            "service_available": bool(subscription and subscription.is_service_active),
+            "usage": usage_snapshot(request.user),
+            "unread_notifications": UserNotification.objects.filter(
+                user=request.user,
+                read_at__isnull=True,
+            ).count(),
+        })
+
+
+class OrderListCreateView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request):
+        queryset = Order.objects.select_related("plan", "offer", "user").filter(user=request.user)
+        pg = DefaultPageNumberPagination()
+        page = pg.paginate_queryset(queryset, request=request)
+        return pg.get_paginated_response(OrderSerializer(page, many=True).data)
+
+    def post(self, request):
+        if not settings.BILLING_ENABLED:
+            raise ValidationError({"message": "套餐功能尚未启用", "code": "billing_disabled"})
+        offer = get_object_or_404(PlanOffer.objects.select_related("plan", "plan__pool"), pk=request.data.get("offer_id"))
+        provider_code = "mock" if settings.BILLING_MOCK_PAYMENTS else "manual"
+        try:
+            order = create_order(
+                request.user,
+                offer,
+                provider=provider_code,
+                idempotency_key=str(request.data.get("idempotency_key") or "").strip() or None,
+                metadata={"source": "user_portal"},
+            )
+            checkout = None
+            provider = get_payment_provider(provider_code)
+            if provider:
+                checkout = provider.create_order(order)
+            if request.data.get("pay_now") and settings.BILLING_MOCK_PAYMENTS:
+                event = PaymentEvent(
+                    event_id=f"mock-{uuid4().hex}",
+                    event_type="PAYMENT_SUCCEEDED",
+                    provider_transaction_id=f"mock-tx-{uuid4().hex}",
+                    amount_cents=order.price_cents,
+                    currency=order.currency,
+                    signature_verified=True,
+                    payload={"mode": "mock", "source": "user_portal"},
+                )
+                order, _ = complete_order(order, event)
+            return Response({"order": OrderSerializer(order).data, "checkout": checkout})
+        except BillingError as exc:
+            raise_api_error(exc)
+
+
+class OrderRenewView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request, order_id):
+        source_order = get_object_or_404(Order, pk=order_id, user=request.user)
+        offer_id = request.data.get("offer_id") or source_order.offer_id
+        offer = get_object_or_404(PlanOffer.objects.select_related("plan", "plan__pool"), pk=offer_id)
+        subscription = active_subscription(request.user)
+        if not subscription or offer.plan_id != subscription.plan_id:
+            raise ValidationError({"message": "续费套餐必须与当前套餐一致", "code": "renew_plan_mismatch"})
+        try:
+            order = create_order(
+                request.user,
+                offer,
+                provider="mock" if settings.BILLING_MOCK_PAYMENTS else "manual",
+                idempotency_key=str(request.data.get("idempotency_key") or "").strip() or None,
+                metadata={"source": "renew", "source_order_id": source_order.id},
+            )
+            return Response({"order": OrderSerializer(order).data})
+        except BillingError as exc:
+            raise_api_error(exc)
+
+
+class OrderMockPayView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request, order_id):
+        if not settings.BILLING_MOCK_PAYMENTS:
+            raise ValidationError({"message": "模拟支付未启用", "code": "mock_payment_disabled"})
+        order = get_object_or_404(Order, pk=order_id, user=request.user)
+        event = PaymentEvent(
+            event_id=str(request.data.get("event_id") or f"mock-{uuid4().hex}"),
+            event_type="PAYMENT_SUCCEEDED",
+            provider_transaction_id=f"mock-tx-{uuid4().hex}",
+            amount_cents=order.price_cents,
+            currency=order.currency,
+            signature_verified=True,
+            payload={"mode": "mock"},
+        )
+        try:
+            order, subscription = complete_order(order, event)
+            return Response({
+                "order": OrderSerializer(order).data,
+                "subscription": SubscriptionSerializer(subscription).data,
+            })
+        except BillingError as exc:
+            raise_api_error(exc)
+
+
+class NotificationListView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request):
+        queryset = UserNotification.objects.filter(user=request.user)
+        unread = request.query_params.get("unread")
+        if unread in ("1", "true"):
+            queryset = queryset.filter(read_at__isnull=True)
+        pg = DefaultPageNumberPagination()
+        page = pg.paginate_queryset(queryset, request=request)
+        response = pg.get_paginated_response(NotificationSerializer(page, many=True).data)
+        response.data["unread_count"] = UserNotification.objects.filter(
+            user=request.user,
+            read_at__isnull=True,
+        ).count()
+        return response
+
+
+class NotificationReadView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request, notification_id):
+        notification = get_object_or_404(UserNotification, pk=notification_id, user=request.user)
+        if notification.read_at is None:
+            notification.read_at = timezone.now()
+            notification.save(update_fields=["read_at"])
+        return Response({"message": "已标记为已读"})

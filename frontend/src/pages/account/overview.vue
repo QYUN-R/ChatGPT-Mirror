@@ -41,7 +41,7 @@ const backupInput = ref<HTMLInputElement | null>(null)
 const metrics = computed(() => [
   { label: '用户总数', value: overview.value?.users.total ?? '-', detail: `${overview.value?.users.active ?? 0} 个启用` },
   { label: '上游账号', value: overview.value?.upstream.total ?? '-', detail: `${overview.value?.upstream.healthy ?? 0} 个健康` },
-  { label: '今日登录', value: overview.value?.activity.today_logins ?? '-', detail: '按自然日统计' },
+  { label: '有效订阅', value: overview.value?.billing?.active_subscriptions ?? '-', detail: `${overview.value?.billing?.pending_orders ?? 0} 个待处理订单` },
   { label: '今日请求', value: overview.value?.activity.today_requests ?? '-', detail: '计入配额的代理请求' }
 ])
 

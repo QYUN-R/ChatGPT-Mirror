@@ -124,7 +124,13 @@ class AccountLogin(ObtainAuthToken):
         serializer.is_valid(raise_exception=True)
 
         user = serializer.validated_data['user']
-        if user.expired_date and user.expired_date <= timezone.now().date():
+        from app.billing.services import has_managed_subscription
+
+        if (
+            user.expired_date
+            and user.expired_date <= timezone.now().date()
+            and not has_managed_subscription(user)
+        ):
             raise ValidationError({"message": "账号已过期"})
 
         user.last_login = timezone.now()
@@ -184,24 +190,34 @@ class AccountRegister(APIView):
         if User.objects.filter(username=data["username"]).exists():
             raise ValidationError({"message": "账号已存在"})
 
-        res_json = req_gateway("post", "/api/get-user-info", json={"chatgpt_token": data["chatgpt_token"]})
-
-        from app.chatgpt.models import ChatgptCar
         with transaction.atomic():
-            chatgptaccount_id = ChatgptAccount.save_data(res_json)
-            chatgptcar = ChatgptCar.objects.create(
-                car_name=f"reg_{data['username']}",
-                gpt_account_list=[chatgptaccount_id],
-                created_time=int(time.time()),
-                updated_time=int(time.time()),
-                remark="用户注册时，系统自动创建",
-            )
-            user = User.objects.create_user(
-                username=data["username"],
-                password=data["password"],
-                last_login=timezone.now(),
-                gptcar_list=[chatgptcar.id],
-            )
+            if settings.BILLING_ENABLED:
+                user = User.objects.create_user(
+                    username=data["username"],
+                    password=data["password"],
+                    last_login=timezone.now(),
+                    gptcar_list=[],
+                )
+            else:
+                res_json = req_gateway("post", "/api/get-user-info", json={
+                    "chatgpt_token": data["chatgpt_token"],
+                })
+                from app.chatgpt.models import ChatgptCar
+
+                chatgptaccount_id = ChatgptAccount.save_data(res_json)
+                chatgptcar = ChatgptCar.objects.create(
+                    car_name=f"reg_{data['username']}",
+                    gpt_account_list=[chatgptaccount_id],
+                    created_time=int(time.time()),
+                    updated_time=int(time.time()),
+                    remark="用户注册时，系统自动创建",
+                )
+                user = User.objects.create_user(
+                    username=data["username"],
+                    password=data["password"],
+                    last_login=timezone.now(),
+                    gptcar_list=[chatgptcar.id],
+                )
 
         token = issue_user_token(user, rotate=True)
         rotate_token(request)

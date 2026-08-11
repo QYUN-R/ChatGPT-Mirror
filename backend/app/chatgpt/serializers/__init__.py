@@ -10,7 +10,10 @@ class ShowGptCarSerializer(serializers.ModelSerializer):
 
     def get_gpt_account_name_list(self, obj):
         gpt_account_list = clean_int_list(obj.gpt_account_list)
-        resutls = ChatgptAccount.objects.filter(id__in=gpt_account_list).values_list("chatgpt_username")
+        resutls = ChatgptAccount.objects.filter(
+            id__in=gpt_account_list,
+            is_archived=False,
+        ).values_list("chatgpt_username")
         return [i[0] for i in resutls]
 
     class Meta:
@@ -78,6 +81,8 @@ class ShowChatgptTokenSerializer(serializers.ModelSerializer):
             "last_check_at",
             "last_error",
             "remark",
+            "is_archived",
+            "archived_at",
             "created_time",
             "updated_time",
             "access_token_exp",

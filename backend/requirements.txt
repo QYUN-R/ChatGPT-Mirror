@@ -13,3 +13,7 @@ sqlparse==0.5.1
 urllib3==2.2.3
 wheel==0.37.1
 django-crontab==0.7.1
+celery==5.4.0
+redis==5.2.1
+psycopg[binary]==3.2.3
+gunicorn==23.0.0

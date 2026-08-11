@@ -198,6 +198,21 @@ class SecurityRegressionTests(TestCase):
         self.assertEqual(response.status_code, 400)
         req_gateway.assert_not_called()
 
+    @override_settings(BILLING_ENABLED=True)
+    @patch("app.accounts.views.login.ALLOW_REGISTER", True)
+    @patch("app.accounts.views.login.req_gateway")
+    @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
+    def test_billing_registration_creates_portal_user_without_upstream_token(self, req_gateway):
+        request = self.factory.post(
+            "/0x/user/register",
+            {"username": "new-billing-user@example.com", "password": "Strong-password-123!"},
+            format="json",
+        )
+        response = AccountRegister.as_view()(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(User.objects.filter(username="new-billing-user@example.com").exists())
+        req_gateway.assert_not_called()
+
     @patch("app.accounts.views.req_gateway", return_value={"message": "ok"})
     def test_password_change_revokes_old_token_and_issues_new_cookie(self, _req_gateway):
         user = User.objects.create_user(

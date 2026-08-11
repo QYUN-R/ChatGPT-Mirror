@@ -26,6 +26,8 @@ class ChatgptAccount(models.Model):
     last_check_at = models.IntegerField(null=True, blank=True, verbose_name="最近诊断时间")
     last_error = models.TextField(null=True, blank=True, verbose_name="最近诊断错误")
     remark = models.TextField(null=True, blank=True,verbose_name="备注")
+    is_archived = models.BooleanField(default=False, db_index=True, verbose_name="已归档")
+    archived_at = models.DateTimeField(null=True, blank=True, verbose_name="归档时间")
     created_time = models.IntegerField(db_index=True, blank=True, verbose_name="创建时间")
     updated_time = models.IntegerField(db_index=True, blank=True, verbose_name="最后修改时间")
 
@@ -38,12 +40,15 @@ class ChatgptAccount(models.Model):
         for line in ChatgptCar.objects.filter(id__in=gptcar_list).values("gpt_account_list"):
             chatgpt_account_list.extend(line["gpt_account_list"])
 
-        return cls.objects.filter(id__in=chatgpt_account_list).order_by("-plan_type", "-id")
+        return cls.objects.filter(
+            id__in=chatgpt_account_list,
+            is_archived=False,
+        ).order_by("-plan_type", "-id")
 
 
     @classmethod
     def get_by_id(cls, chatgpt_id):
-        return cls.objects.filter(id=chatgpt_id).first()
+        return cls.objects.filter(id=chatgpt_id, is_archived=False).first()
 
     def refresh_auth_diagnostics(self, force=False):
         now = int(time.time())
@@ -107,6 +112,8 @@ class ChatgptAccount(models.Model):
         new_obj.session_token_valid = bool(data.get("session_token_valid"))
         new_obj.last_check_at = data.get("last_check_at") or int(time.time())
         new_obj.last_error = data.get("last_error") or ""
+        new_obj.is_archived = False
+        new_obj.archived_at = None
 
         new_obj.updated_time = int(time.time())
 

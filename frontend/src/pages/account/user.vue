@@ -51,6 +51,13 @@
             {{ row.force_chat_mode !== false ? '自动切回' : '允许 Work' }}
           </t-tag>
         </template>
+        <template #subscription="{ row }">
+          <div v-if="row.subscription" class="subscription-cell">
+            <strong>{{ row.subscription.plan_name }}</strong>
+            <span>{{ row.subscription.status }}</span>
+          </div>
+          <span v-else class="text-gray">未开通</span>
+        </template>
         <template #op="{ row }">
           <t-space>
             <t-link theme="primary" @click="showEditDialog(row)">编辑</t-link>
@@ -152,6 +159,7 @@ const columns = [
   { colKey: 'is_active', title: '状态', cell: 'is_active', width: 80 },
   { colKey: 'model_limit', title: '模型限制', cell: 'model_limit', width: 180 },
   { colKey: 'force_chat_mode', title: 'Work 模式', cell: 'force_chat_mode', width: 110 },
+  { colKey: 'subscription', title: '套餐', cell: 'subscription', width: 130 },
   { colKey: 'expired_date', title: '过期日期', cell: 'expired_date', width: 120 },
   { colKey: 'remark', title: '备注', ellipsis: true },
   { colKey: 'op', title: '操作', cell: 'op', width: 150 }
@@ -327,6 +335,19 @@ const batchAction = async (action: 'activate' | 'deactivate') => {
   color: var(--app-text-muted);
   font-size: 12px;
   line-height: 1.6;
+}
+.subscription-cell strong,
+.subscription-cell span {
+  display: block;
+}
+.subscription-cell strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+.subscription-cell span {
+  margin-top: 3px;
+  color: var(--app-text-muted);
+  font-size: 11px;
 }
 .table-toolbar {
   display: grid;

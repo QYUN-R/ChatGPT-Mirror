@@ -1,0 +1,132 @@
+services:
+  chatgpt-mirror:
+    volumes:
+      - ./data:/app/data
+      - ./gateway/static:/app/static:ro
+
+  django:
+    image: chatgpt-mirror-commercial-backend:local
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      BILLING_ENABLED: "${BILLING_ENABLED:-true}"
+      BILLING_ENFORCE_SUBSCRIPTION: "${BILLING_ENFORCE_SUBSCRIPTION:-false}"
+      BILLING_MOCK_PAYMENTS: "${BILLING_MOCK_PAYMENTS:-false}"
+      BILLING_ORDER_HOLD_MINUTES: "${BILLING_ORDER_HOLD_MINUTES:-30}"
+      DATABASE_ENGINE: "${DATABASE_ENGINE:-sqlite}"
+      SQLITE_PATH: "${SQLITE_PATH:-/app/backend/db/db.sqlite3}"
+      POSTGRES_DB: "${POSTGRES_DB:-chatgpt_mirror}"
+      POSTGRES_USER: "${POSTGRES_USER:-chatgpt_mirror}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
+      POSTGRES_HOST: "${POSTGRES_HOST:-postgres}"
+      POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
+      CELERY_BROKER_URL: "${CELERY_BROKER_URL:-redis://redis:6379/0}"
+      CELERY_RESULT_BACKEND: "${CELERY_RESULT_BACKEND:-redis://redis:6379/1}"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: chatgpt-mirror-commercial-backend:local
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["celery", "-A", "app", "worker", "--loglevel=INFO", "--concurrency=${CELERY_WORKER_CONCURRENCY:-2}"]
+    env_file:
+      - .env
+    environment:
+      DJANGO_ENV: "PRODUCTION"
+      CHATGPT_GATEWAY_URL: "http://chatgpt-mirror:${PORT:-40002}"
+      BILLING_ENABLED: "${BILLING_ENABLED:-true}"
+      BILLING_ENFORCE_SUBSCRIPTION: "${BILLING_ENFORCE_SUBSCRIPTION:-false}"
+      DATABASE_ENGINE: "${DATABASE_ENGINE:-sqlite}"
+      SQLITE_PATH: "${SQLITE_PATH:-/app/backend/db/db.sqlite3}"
+      POSTGRES_DB: "${POSTGRES_DB:-chatgpt_mirror}"
+      POSTGRES_USER: "${POSTGRES_USER:-chatgpt_mirror}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
+      POSTGRES_HOST: "${POSTGRES_HOST:-postgres}"
+      POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
+      CELERY_BROKER_URL: "${CELERY_BROKER_URL:-redis://redis:6379/0}"
+      CELERY_RESULT_BACKEND: "${CELERY_RESULT_BACKEND:-redis://redis:6379/1}"
+    volumes:
+      - ./backend/logs:/app/backend/logs
+      - ./backend/db:/app/backend/db
+    depends_on:
+      redis:
+        condition: service_healthy
+      django:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - chatgpt-network
+
+  beat:
+    image: chatgpt-mirror-commercial-backend:local
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["celery", "-A", "app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    env_file:
+      - .env
+    environment:
+      DJANGO_ENV: "PRODUCTION"
+      CHATGPT_GATEWAY_URL: "http://chatgpt-mirror:${PORT:-40002}"
+      BILLING_ENABLED: "${BILLING_ENABLED:-true}"
+      BILLING_ENFORCE_SUBSCRIPTION: "${BILLING_ENFORCE_SUBSCRIPTION:-false}"
+      DATABASE_ENGINE: "${DATABASE_ENGINE:-sqlite}"
+      SQLITE_PATH: "${SQLITE_PATH:-/app/backend/db/db.sqlite3}"
+      POSTGRES_DB: "${POSTGRES_DB:-chatgpt_mirror}"
+      POSTGRES_USER: "${POSTGRES_USER:-chatgpt_mirror}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
+      POSTGRES_HOST: "${POSTGRES_HOST:-postgres}"
+      POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
+      CELERY_BROKER_URL: "${CELERY_BROKER_URL:-redis://redis:6379/0}"
+      CELERY_RESULT_BACKEND: "${CELERY_RESULT_BACKEND:-redis://redis:6379/1}"
+    volumes:
+      - ./backend/logs:/app/backend/logs
+      - ./backend/db:/app/backend/db
+    depends_on:
+      redis:
+        condition: service_healthy
+      django:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - chatgpt-network
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      - chatgpt-network
+
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-chatgpt_mirror}"
+      POSTGRES_USER: "${POSTGRES_USER:-chatgpt_mirror}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set for PostgreSQL}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-chatgpt_mirror} -d ${POSTGRES_DB:-chatgpt_mirror}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+    networks:
+      - chatgpt-network
+
+volumes:
+  redis-data:
+  postgres-data:

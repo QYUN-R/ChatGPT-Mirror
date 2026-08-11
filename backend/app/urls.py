@@ -22,6 +22,8 @@ from app.settings import DEBUG
 urlpatterns = [
     path("0x/user/", include("app.accounts.urls")),
     path("0x/chatgpt/", include("app.chatgpt.urls")),
+    path("0x/billing/", include("app.billing.urls")),
+    path("0x/admin/", include("app.billing.admin_urls")),
 ]
 
 if DEBUG:

@@ -1,0 +1,10 @@
+.venv/
+gateway/static/
+frontend/node_modules/
+backend/db/
+backend/logs/
+frontend/*.log
+.env
+backups/
+*.pyc
+__pycache__/

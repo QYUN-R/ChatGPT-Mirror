@@ -66,6 +66,42 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '账号池', requiresAdmin: true }
       },
       {
+        path: 'plans',
+        name: 'Plans',
+        component: () => import('@/pages/account/plans.vue'),
+        meta: { title: '套餐配置', requiresAdmin: true }
+      },
+      {
+        path: 'pools',
+        name: 'CommercialPools',
+        component: () => import('@/pages/account/pools.vue'),
+        meta: { title: '商业号池', requiresAdmin: true }
+      },
+      {
+        path: 'subscriptions',
+        name: 'Subscriptions',
+        component: () => import('@/pages/account/subscriptions.vue'),
+        meta: { title: '用户订阅', requiresAdmin: true }
+      },
+      {
+        path: 'orders',
+        name: 'Orders',
+        component: () => import('@/pages/account/orders.vue'),
+        meta: { title: '订单', requiresAdmin: true }
+      },
+      {
+        path: 'announcements',
+        name: 'Announcements',
+        component: () => import('@/pages/account/announcements.vue'),
+        meta: { title: '公告', requiresAdmin: true }
+      },
+      {
+        path: 'audit',
+        name: 'AuditLogs',
+        component: () => import('@/pages/account/audit.vue'),
+        meta: { title: '审计日志', requiresAdmin: true }
+      },
+      {
         path: 'logs',
         name: 'Logs',
         component: () => import('@/pages/account/logs.vue'),
@@ -94,6 +130,18 @@ const routes: RouteRecordRaw[] = [
         name: 'Profile',
         component: () => import('@/pages/account/profile.vue'),
         meta: { title: '账户中心' }
+      },
+      {
+        path: 'billing',
+        name: 'Billing',
+        component: () => import('@/pages/account/billing.vue'),
+        meta: { title: '套餐中心' }
+      },
+      {
+        path: 'notifications',
+        name: 'Notifications',
+        component: () => import('@/pages/account/notifications.vue'),
+        meta: { title: '通知' }
       }
     ]
   }
@@ -116,6 +164,10 @@ router.beforeEach(async (to, _from, next) => {
   }
 
   const authenticated = await userStore.hydrate()
+  if (to.path === '/account/overview' && authenticated && !userStore.isAdmin) {
+    next('/account/billing')
+    return
+  }
   if (to.meta.requiresAdmin && (!authenticated || !userStore.isAdmin)) {
     clearAccessibleCookies()
     window.location.replace('/admin#/')

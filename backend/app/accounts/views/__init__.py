@@ -20,6 +20,8 @@ from app.page import DefaultPageNumberPagination
 from app.settings import ADMIN_USERNAME
 from app.utils import get_request_subject, req_gateway
 from app.accounts.views.login import issue_user_token
+from app.billing.exceptions import BillingError
+from app.billing.services import resolve_managed_account
 
 
 def revoke_user_sessions(user):
@@ -69,8 +71,15 @@ class GetMirrorToken(APIView):
 
     def get(self, request):
         user = request.user
-
-        user_gpt_list = ChatgptAccount.get_by_gptcar_list(user.gptcar_list)
+        try:
+            managed_account = resolve_managed_account(user)
+        except BillingError as exc:
+            raise ValidationError({"message": exc.message, "code": exc.code})
+        user_gpt_list = (
+            [managed_account]
+            if managed_account
+            else ChatgptAccount.get_by_gptcar_list(user.gptcar_list)
+        )
         chatgpt_username_list = [i.chatgpt_username for i in user_gpt_list]
         res = req_gateway("post", "/api/get-mirror-token", json={
             "isolated_session": user.isolated_session,
@@ -82,10 +91,14 @@ class GetMirrorToken(APIView):
             "force_chat_mode": user.force_chat_mode,
         })
         for line in res:
-            obj = ChatgptAccount.objects.filter(chatgpt_username=line["chatgpt_username"]).first()
+            original_username = line.get("chatgpt_username")
+            obj = ChatgptAccount.objects.filter(chatgpt_username=original_username).first()
             if obj:
                 line["auth_status"] = obj.auth_status
                 line["plan_type"] = obj.plan_type
+            if managed_account:
+                line["chatgpt_username"] = "套餐专属账号"
+                line["managed_assignment"] = True
         return Response(res)
 
 
@@ -94,7 +107,15 @@ class UserChatGPTAccountList(APIView):
 
     def get(self, request):
         results = []
-        user_gpt_list = ChatgptAccount.get_by_gptcar_list(request.user.gptcar_list)
+        try:
+            managed_account = resolve_managed_account(request.user)
+        except BillingError as exc:
+            raise ValidationError({"message": exc.message, "code": exc.code})
+        user_gpt_list = (
+            [managed_account]
+            if managed_account
+            else ChatgptAccount.get_by_gptcar_list(request.user.gptcar_list)
+        )
         for account in user_gpt_list:
             try:
                 account.refresh_auth_diagnostics()
@@ -121,18 +142,19 @@ class UserChatGPTAccountList(APIView):
             if line.session_token_valid:
                 supported_login_modes.append("web")
             results.append({
-                "id": line.id,
+                "id": 0 if managed_account else line.id,
                 "use_count": last_3h_use_count,
-                "chatgpt_flag": "{:03}{}".format(line.id, line.chatgpt_username[:3]),
+                "chatgpt_flag": "套餐专属账号" if managed_account else "{:03}{}".format(line.id, line.chatgpt_username[:3]),
                 "plan_type": line.plan_type,
                 "auth_status": line.auth_status,
                 "access_token_valid": line.access_token_valid,
                 "session_token_valid": line.session_token_valid,
                 "supported_login_modes": supported_login_modes,
                 "default_login_mode": "api",
+                "managed_assignment": bool(managed_account),
             })
 
-        return Response({"results": results})
+        return Response({"results": results, "managed_assignment": bool(managed_account)})
 
 
 class BatchModelLimit(APIView):
@@ -210,7 +232,7 @@ class UserAccountView(generics.ListCreateAPIView):
     permission_classes = (IsAuthenticated, IsAdminUser)
 
     def get(self, request, *args, **kwargs):
-        queryset = User.objects.order_by("-id").all()
+        queryset = User.objects.select_related("billing_subscription__plan").order_by("-id").all()
         query = str(request.query_params.get("q") or "").strip()
         if query:
             queryset = queryset.filter(Q(username__icontains=query) | Q(remark__icontains=query))
@@ -401,7 +423,7 @@ class OperationsOverviewView(APIView):
             )
         except ValidationError:
             gateway_metrics = {}
-        return Response({
+        result = {
             "users": {
                 "total": User.objects.count(),
                 "active": User.objects.filter(is_active=True).count(),
@@ -422,4 +444,10 @@ class OperationsOverviewView(APIView):
                 "active_sessions": int(gateway_metrics.get("active_sessions", 0)),
             },
             "generated_at": int(time.time()),
-        })
+        }
+        from django.conf import settings
+        if settings.BILLING_ENABLED:
+            from app.billing.selectors import admin_overview
+
+            result["billing"] = admin_overview()
+        return Response(result)

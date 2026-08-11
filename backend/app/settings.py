@@ -150,6 +150,7 @@ INSTALLED_APPS = [
     "rest_framework.authtoken",
     "app.accounts",
     "app.chatgpt",
+    "app.billing",
     "django_crontab",
 ]
 
@@ -227,12 +228,34 @@ DB_PATH = "{}/db".format(BASE_DIR)
 if not os.path.exists(DB_PATH):
     os.makedirs(DB_PATH)
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": "{}/db.sqlite3".format(DB_PATH),
+DATABASE_ENGINE = os.environ.get("DATABASE_ENGINE", "sqlite").strip().lower()
+if DATABASE_ENGINE in {"postgres", "postgresql"}:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.environ.get("POSTGRES_DB", "chatgpt_mirror"),
+            "USER": os.environ.get("POSTGRES_USER", "chatgpt_mirror"),
+            "PASSWORD": os.environ.get("POSTGRES_PASSWORD", ""),
+            "HOST": os.environ.get("POSTGRES_HOST", "postgres"),
+            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+            "CONN_MAX_AGE": int(os.environ.get("POSTGRES_CONN_MAX_AGE", "60")),
+            "OPTIONS": {"connect_timeout": 10},
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": os.environ.get("SQLITE_PATH", "{}/db.sqlite3".format(DB_PATH)),
+        }
+    }
+
+MIGRATION_SOURCE_SQLITE_PATH = os.environ.get("MIGRATION_SOURCE_SQLITE_PATH", "").strip()
+if MIGRATION_SOURCE_SQLITE_PATH:
+    DATABASES["legacy_sqlite"] = {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": MIGRATION_SOURCE_SQLITE_PATH,
+    }
 
 # Password validation
 # https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
@@ -262,6 +285,53 @@ TIME_ZONE = "Asia/Shanghai"
 USE_I18N = True
 
 USE_TZ = True
+
+BILLING_ENABLED = env_bool("BILLING_ENABLED", False)
+BILLING_ENFORCE_SUBSCRIPTION = env_bool("BILLING_ENFORCE_SUBSCRIPTION", False)
+BILLING_MOCK_PAYMENTS = env_bool("BILLING_MOCK_PAYMENTS", False)
+BILLING_ORDER_HOLD_MINUTES = int(os.environ.get("BILLING_ORDER_HOLD_MINUTES", "30"))
+PAYMENT_CALLBACK_LOCK_ENABLED = env_bool(
+    "PAYMENT_CALLBACK_LOCK_ENABLED",
+    DJANGO_ENV == "PRODUCTION",
+)
+
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/1")
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = int(os.environ.get("CELERY_TASK_TIME_LIMIT", "300"))
+CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", False)
+CELERY_BEAT_SCHEDULE = {
+    "billing-expire-reservations-every-five-minutes": {
+        "task": "app.billing.tasks.expire_stale_reservations_task",
+        "schedule": 300.0,
+    },
+    "billing-maintenance-every-hour": {
+        "task": "app.billing.tasks.subscription_maintenance_task",
+        "schedule": 3600.0,
+    },
+    "billing-expiry-reminders-daily": {
+        "task": "app.billing.tasks.expiry_reminders_task",
+        "schedule": 86400.0,
+    },
+    "billing-account-health-every-fifteen-minutes": {
+        "task": "app.billing.tasks.account_health_task",
+        "schedule": 900.0,
+    },
+}
+
+EMAIL_NOTIFICATIONS_ENABLED = env_bool("EMAIL_NOTIFICATIONS_ENABLED", False)
+EMAIL_BACKEND = os.environ.get(
+    "EMAIL_BACKEND",
+    "django.core.mail.backends.smtp.EmailBackend",
+)
+EMAIL_HOST = os.environ.get("EMAIL_HOST", "")
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "465"))
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_SSL = env_bool("EMAIL_USE_SSL", True)
+EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", False)
+EMAIL_TIMEOUT = int(os.environ.get("EMAIL_TIMEOUT", "15"))
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER or "noreply@localhost")
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.1/howto/static-files/

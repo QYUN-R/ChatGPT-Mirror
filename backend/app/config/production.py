@@ -16,7 +16,7 @@ ADMIN_USERNAME = required_env("ADMIN_USERNAME")
 ADMIN_PASSWORD = required_env("ADMIN_PASSWORD")
 GATEWAY_ADMIN_SECRET = required_env("GATEWAY_ADMIN_SECRET")
 CHATGPT_GATEWAY_URL = required_env("CHATGPT_GATEWAY_URL")
-ALLOW_REGISTER = os.environ.get("ALLOW_REGISTER", "false") == "true"
+ALLOW_REGISTER = os.environ.get("ALLOW_REGISTER", "true") == "true"
 SHOW_GITHUB = os.environ.get("SHOW_GITHUB", "true") == "true"
 
 TURNSTILE_MODE = os.environ.get("CLOUDFLARE_TURNSTILE", "disable").strip().lower()

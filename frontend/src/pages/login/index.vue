@@ -46,7 +46,7 @@
             </t-form-item>
           </div>
 
-          <div v-if="isRegister" class="form-field">
+          <div v-if="isRegister && !cfg.billing_enabled" class="form-field">
             <label for="register-upstream-token">上游账号令牌</label>
             <t-form-item name="chatgpt_token">
               <t-textarea
@@ -78,7 +78,7 @@
         </t-form>
       </t-loading>
 
-      <p class="account-switch">
+      <p v-if="isRegister || cfg.allow_register" class="account-switch">
         <template v-if="isRegister">
           已有账户？
           <router-link to="/login">登录</router-link>
@@ -129,6 +129,8 @@ declare global {
 
 const cfg = ref({
   show_github: true,
+  allow_register: false,
+  billing_enabled: false,
   notice: '',
   turnstile_enabled: false,
   turnstile_site_key: ''
@@ -145,14 +147,22 @@ const loginForm = reactive({
   chatgpt_token: ''
 })
 
-const rules = {
-  username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
-  password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
-  chatgpt_token: [{ required: true, message: '请输入上游账号令牌', trigger: 'blur' }]
-}
-
 const isRegister = computed(() => {
   return route.path.endsWith('/register')
+})
+const rules = computed(() => {
+  const baseRules = {
+    username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
+    password: [{ required: true, message: '请输入密码', trigger: 'blur' }]
+  }
+
+  if (isRegister.value && !cfg.value.billing_enabled) {
+    return {
+      ...baseRules,
+      chatgpt_token: [{ required: true, message: '请输入上游账号令牌', trigger: 'blur' }]
+    }
+  }
+  return baseRules
 })
 const turnstileEnabled = computed(() => {
   return cfg.value.turnstile_enabled && Boolean(cfg.value.turnstile_site_key)
@@ -258,6 +268,9 @@ const getVersionCfg = async () => {
     const response = await fetch('/0x/user/version-cfg')
     const data = await response.json()
     Object.assign(cfg.value, data)
+    if (isRegister.value && !cfg.value.allow_register) {
+      await router.replace('/login')
+    }
   } catch (e) {
     console.error('Failed to get version config')
   }
@@ -273,16 +286,13 @@ const onSubmit = async ({ validateResult }: any) => {
     loading.value = true
     try {
       const url = isRegister.value ? '/0x/user/register' : '/0x/user/login'
-      const credentials = isRegister.value
-        ? {
-            username: loginForm.username,
-            password: loginForm.password,
-            chatgpt_token: loginForm.chatgpt_token
-          }
-        : {
-            username: loginForm.username,
-            password: loginForm.password
-          }
+      const credentials = {
+        username: loginForm.username,
+        password: loginForm.password,
+        ...(isRegister.value && !cfg.value.billing_enabled
+          ? { chatgpt_token: loginForm.chatgpt_token }
+          : {})
+      }
       const data = await userStore.login(url, {
         ...credentials,
         turnstile_token: turnstileToken.value
@@ -291,7 +301,18 @@ const onSubmit = async ({ validateResult }: any) => {
       if (data.authenticated && data.is_admin) {
         router.push({ name: 'User' })
       } else if (data.authenticated) {
-        router.push({ name: 'LoginChatgpt' })
+        let billing: any = null
+        try {
+          const response = await fetch('/0x/billing/me')
+          if (response.ok) billing = await response.json()
+        } catch {
+          billing = null
+        }
+        if (billing?.enabled && !billing.service_available && (billing.enforced || billing.subscription || isRegister.value)) {
+          router.push({ name: 'Billing' })
+        } else {
+          router.push({ name: 'LoginChatgpt' })
+        }
       }
     } catch (error: any) {
       MessagePlugin.error(error.message || '操作失败')

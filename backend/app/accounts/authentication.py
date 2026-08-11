@@ -33,6 +33,10 @@ class ExpiringCookieTokenAuthentication(TokenAuthentication):
         user, token = result
         expires_at = token.created + timedelta(seconds=settings.API_TOKEN_TTL_SECONDS)
         expired_account = user.expired_date and user.expired_date <= timezone.localdate()
+        if expired_account:
+            from app.billing.services import has_managed_subscription
+
+            expired_account = not has_managed_subscription(user)
         if timezone.now() >= expires_at or not user.is_active or expired_account:
             type(token).objects.filter(user=user).delete()
             try:

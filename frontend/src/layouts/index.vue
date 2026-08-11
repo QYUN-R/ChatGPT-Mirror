@@ -22,6 +22,30 @@
             <template #icon><t-icon name="server" /></template>
             <span class="menu-label">账号池</span>
           </t-menu-item>
+          <t-menu-item v-if="userStore.isAdmin" value="/account/plans">
+            <template #icon><t-icon name="money-circle" /></template>
+            <span class="menu-label">套餐配置</span>
+          </t-menu-item>
+          <t-menu-item v-if="userStore.isAdmin" value="/account/pools">
+            <template #icon><t-icon name="layers" /></template>
+            <span class="menu-label">商业号池</span>
+          </t-menu-item>
+          <t-menu-item v-if="userStore.isAdmin" value="/account/subscriptions">
+            <template #icon><t-icon name="usergroup" /></template>
+            <span class="menu-label">用户订阅</span>
+          </t-menu-item>
+          <t-menu-item v-if="userStore.isAdmin" value="/account/orders">
+            <template #icon><t-icon name="order-ascending" /></template>
+            <span class="menu-label">订单</span>
+          </t-menu-item>
+          <t-menu-item v-if="userStore.isAdmin" value="/account/announcements">
+            <template #icon><t-icon name="notification" /></template>
+            <span class="menu-label">公告</span>
+          </t-menu-item>
+          <t-menu-item v-if="userStore.isAdmin" value="/account/audit">
+            <template #icon><t-icon name="history" /></template>
+            <span class="menu-label">审计日志</span>
+          </t-menu-item>
           <t-menu-item v-if="userStore.isAdmin" value="/account/logs">
             <template #icon><t-icon name="file" /></template>
             <span class="menu-label">日志</span>
@@ -37,6 +61,14 @@
           <t-menu-item v-if="userStore.isAdmin" value="/account/access">
             <template #icon><t-icon name="secured" /></template>
             <span class="menu-label">访问与安全</span>
+          </t-menu-item>
+          <t-menu-item value="/account/billing">
+            <template #icon><t-icon name="wallet" /></template>
+            <span class="menu-label">套餐中心</span>
+          </t-menu-item>
+          <t-menu-item value="/account/notifications">
+            <template #icon><t-icon name="mail" /></template>
+            <span class="menu-label">通知</span>
           </t-menu-item>
           <t-menu-item value="/account/profile">
             <template #icon><t-icon name="user-circle" /></template>
@@ -117,9 +149,13 @@ const handleUserAction = (data: { value: string }) => {
   top: 0;
   height: 100vh;
   height: 100dvh;
+  min-width: 232px;
+  flex: 0 0 232px;
   color: var(--app-text);
   background: #f1f1ee;
   border-right: 1px solid var(--app-border);
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .sidebar-title {
@@ -135,11 +171,15 @@ const handleUserAction = (data: { value: string }) => {
 }
 
 .nav-menu {
+  width: 100%;
+  min-width: 0;
   padding: 12px 10px;
   background: transparent;
+  overflow-x: hidden;
 }
 
 .nav-menu :deep(.t-menu__item) {
+  min-width: 0;
   height: 44px;
   margin-bottom: 4px;
   color: #555550;
@@ -199,6 +239,7 @@ const handleUserAction = (data: { value: string }) => {
 }
 
 .content {
+  min-width: 0;
   padding: 32px;
   background: var(--app-bg);
   min-height: calc(100vh - 64px);
@@ -213,6 +254,8 @@ const handleUserAction = (data: { value: string }) => {
 @media (max-width: 900px) {
   .sidebar {
     width: 76px !important;
+    min-width: 76px;
+    flex: 0 0 76px !important;
     flex-basis: 76px !important;
   }
 
@@ -232,6 +275,8 @@ const handleUserAction = (data: { value: string }) => {
   }
 
   .nav-menu :deep(.t-menu__item) {
+    width: 60px;
+    min-width: 60px;
     justify-content: center;
     padding: 0;
   }
@@ -252,7 +297,14 @@ const handleUserAction = (data: { value: string }) => {
 @media (max-width: 560px) {
   .sidebar {
     width: 64px !important;
+    min-width: 64px;
+    flex: 0 0 64px !important;
     flex-basis: 64px !important;
+  }
+
+  .nav-menu :deep(.t-menu__item) {
+    width: 48px;
+    min-width: 48px;
   }
 
   .header {
