@@ -40,14 +40,8 @@ services:
     secrets:
       - source: alipay_app_private_key
         target: alipay_app_private_key
-        uid: "0"
-        gid: "0"
-        mode: 0400
       - source: alipay_public_key
         target: alipay_public_key
-        uid: "0"
-        gid: "0"
-        mode: 0444
 
   worker:
     image: chatgpt-mirror-commercial-backend:local
@@ -77,14 +71,8 @@ services:
     secrets:
       - source: alipay_app_private_key
         target: alipay_app_private_key
-        uid: "0"
-        gid: "0"
-        mode: 0400
       - source: alipay_public_key
         target: alipay_public_key
-        uid: "0"
-        gid: "0"
-        mode: 0444
     depends_on:
       redis:
         condition: service_healthy
