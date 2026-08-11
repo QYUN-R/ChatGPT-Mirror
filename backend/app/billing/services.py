@@ -158,7 +158,7 @@ def _release_reservations(subscription, *, except_plan_id=None, reason="released
 def refresh_subscription_state(user):
     subscription = (
         Subscription.objects.select_for_update()
-        .select_related("plan", "scheduled_plan", "scheduled_offer", "user")
+        .select_related("plan", "user")
         .filter(user=user)
         .first()
     )

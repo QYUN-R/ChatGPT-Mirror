@@ -3,7 +3,9 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import connection
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 from rest_framework.test import APIClient
@@ -244,6 +246,20 @@ class BillingServiceTests(TestCase):
         renewal = create_order(self.user, self.standard_offer, provider="mock")
         _, renewed = complete_order(renewal, self.payment_event(renewal))
         self.assertEqual(renewed.ends_at, add_months(original_end, 1))
+
+    def test_subscription_refresh_lock_query_avoids_nullable_outer_joins(self):
+        self.purchase()
+
+        with CaptureQueriesContext(connection) as captured:
+            refresh_subscription_state(self.user)
+
+        subscription_queries = [
+            query["sql"]
+            for query in captured.captured_queries
+            if "billing_subscription" in query["sql"]
+        ]
+        self.assertTrue(subscription_queries)
+        self.assertNotIn("LEFT OUTER JOIN", subscription_queries[0].upper())
 
     def test_upgrade_is_immediate_and_preserves_remaining_time(self):
         _, subscription = self.purchase()
