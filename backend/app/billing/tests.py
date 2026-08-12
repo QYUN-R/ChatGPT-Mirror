@@ -26,6 +26,7 @@ from app.billing.models import (
     PoolAccountPolicy,
     PoolTier,
     SupportContact,
+    Subscription,
     SubscriptionStatus,
     UserNotification,
 )
@@ -670,6 +671,77 @@ class BillingApiTests(TestCase):
         self.user.refresh_from_db()
         self.assertEqual(self.user.daily_quota, 30)
         self.assertEqual(self.user.monthly_quota, 600)
+
+    def test_admin_can_view_active_account_users_without_upstream_credentials(self):
+        self.user.email = "bound-user@example.com"
+        self.user.email_verified_at = timezone.now()
+        self.user.save(update_fields=["email", "email_verified_at"])
+        order = create_order(self.user, self.offer, provider="mock")
+        _, subscription = complete_order(order, BillingServiceTests.payment_event(order))
+        assignment = ensure_assignment(subscription)
+        assignment.last_used_at = timezone.now()
+        assignment.save(update_fields=["last_used_at", "updated_at"])
+
+        inactive_user = User.objects.create_user(
+            username="inactive-binding@example.com",
+            password="Strong-password-123!",
+        )
+        inactive_subscription = Subscription.objects.create(
+            user=inactive_user,
+            plan=self.plan,
+            offer=self.offer,
+            status=SubscriptionStatus.ACTIVE,
+            source="manual",
+            starts_at=timezone.now(),
+            ends_at=timezone.now() + timedelta(days=30),
+        )
+        AccountAssignment.objects.create(
+            subscription=inactive_subscription,
+            user=inactive_user,
+            pool=self.pool,
+            account=self.account,
+            active=False,
+        )
+        self.account.session_token = "secret-session-token"
+        self.account.refresh_token = "secret-refresh-token"
+        self.account.extra_cookies = [{"name": "session", "value": "secret-cookie-value"}]
+        self.account.save(update_fields=[
+            "session_token",
+            "refresh_token",
+            "extra_cookies",
+            "updated_time",
+        ])
+
+        policy = PoolAccountPolicy.objects.get(account=self.account)
+        self.client.force_authenticate(self.admin)
+        response = self.client.get(f"/0x/admin/pools/{policy.id}/usage")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["policy"]["active_bindings"], 1)
+        self.assertEqual(len(response.data["users"]), 1)
+        self.assertEqual(response.data["users"][0]["username"], self.user.username)
+        self.assertEqual(response.data["users"][0]["email"], self.user.email)
+        self.assertTrue(response.data["users"][0]["email_verified"])
+        self.assertEqual(response.data["users"][0]["plan_name"], self.plan.name)
+        rendered = json.dumps(response.data, ensure_ascii=False)
+        for secret in (
+            "secret-upstream-token",
+            "secret-session-token",
+            "secret-refresh-token",
+            "secret-cookie-value",
+        ):
+            self.assertNotIn(secret, rendered)
+        for sensitive_field in (
+            "access_token",
+            "session_token",
+            "refresh_token",
+            "extra_cookies",
+        ):
+            self.assertNotIn(sensitive_field, rendered)
+
+        self.client.force_authenticate(self.user)
+        forbidden = self.client.get(f"/0x/admin/pools/{policy.id}/usage")
+        self.assertEqual(forbidden.status_code, 403)
 
     def test_support_contacts_are_admin_managed_and_user_visible(self):
         png_data_uri = (

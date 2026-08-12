@@ -36,22 +36,25 @@
         </t-select>
       </div>
       <t-loading :loading="loading">
-        <t-table :data="filteredPolicies" :columns="columns" row-key="id">
-          <template #tier="{ row }">{{ row.tier === 'PREMIUM' ? '高级' : '普通' }}</template>
-          <template #bindings="{ row }">{{ row.active_bindings }} / {{ row.binding_limit }}</template>
-          <template #health="{ row }">
-            <t-tag :theme="statusTheme(row.health_status) as any" variant="light">{{ healthLabel(row.health_status) }}</t-tag>
-          </template>
-          <template #last_check="{ row }">{{ formatDateTime(row.last_health_check_at) }}</template>
-          <template #op="{ row }">
-            <t-space size="small">
-              <t-link theme="primary" @click="openDialog(row)">编辑</t-link>
-              <t-popconfirm content="停用后新用户不会再分配到该账号" @confirm="disablePolicy(row)">
-                <t-link theme="danger">停用</t-link>
-              </t-popconfirm>
-            </t-space>
-          </template>
-        </t-table>
+        <div class="policy-table-scroll">
+          <t-table :data="filteredPolicies" :columns="columns" row-key="id">
+            <template #tier="{ row }">{{ row.tier === 'PREMIUM' ? '高级' : '普通' }}</template>
+            <template #bindings="{ row }">{{ row.active_bindings }} / {{ row.binding_limit }}</template>
+            <template #health="{ row }">
+              <t-tag :theme="statusTheme(row.health_status) as any" variant="light">{{ healthLabel(row.health_status) }}</t-tag>
+            </template>
+            <template #last_check="{ row }">{{ formatDateTime(row.last_health_check_at) }}</template>
+            <template #op="{ row }">
+              <t-space size="small">
+                <t-link theme="primary" @click="openUsage(row)">查看使用</t-link>
+                <t-link theme="primary" @click="openDialog(row)">编辑</t-link>
+                <t-popconfirm content="停用后新用户不会再分配到该账号" @confirm="disablePolicy(row)">
+                  <t-link theme="danger">停用</t-link>
+                </t-popconfirm>
+              </t-space>
+            </template>
+          </t-table>
+        </div>
       </t-loading>
     </section>
 
@@ -93,6 +96,66 @@
         <t-form-item label="允许分配"><t-switch v-model="form.enabled" /></t-form-item>
       </t-form>
     </t-dialog>
+
+    <t-dialog
+      v-model:visible="usageVisible"
+      :header="usagePolicy ? `${usagePolicy.account_name} · 使用情况` : '账号使用情况'"
+      width="min(860px, calc(100vw - 24px))"
+      :footer="false"
+      @close="closeUsage"
+    >
+      <t-loading :loading="usageLoading">
+        <div v-if="usagePolicy" class="usage-dialog">
+          <div class="usage-summary">
+            <div><span>所属号池</span><strong>{{ usagePolicy.pool_name }}</strong></div>
+            <div><span>当前使用</span><strong>{{ usagePolicy.active_bindings }} 人</strong></div>
+            <div><span>绑定上限</span><strong>{{ usagePolicy.binding_limit }} 人</strong></div>
+          </div>
+
+          <div class="desktop-usage-table">
+            <t-table :data="usageUsers" :columns="usageColumns" row-key="id" size="small">
+              <template #email="{ row }">
+                <div class="email-usage-cell">
+                  <span class="breakable">{{ row.email || '未绑定' }}</span>
+                  <t-tag v-if="row.email" :theme="row.email_verified ? 'success' : 'warning'" size="small" variant="light">
+                    {{ row.email_verified ? '已验证' : '待验证' }}
+                  </t-tag>
+                </div>
+              </template>
+              <template #status="{ row }">
+                <t-tag :theme="statusTheme(row.subscription_status) as any" variant="light">
+                  {{ subscriptionStatusLabel(row.subscription_status) }}
+                </t-tag>
+              </template>
+              <template #ends_at="{ row }">{{ formatDateTime(row.subscription_ends_at) }}</template>
+              <template #assigned_at="{ row }">{{ formatDateTime(row.assigned_at) }}</template>
+              <template #last_used_at="{ row }">{{ formatDateTime(row.last_used_at) }}</template>
+            </t-table>
+          </div>
+
+          <div class="mobile-usage-list">
+            <article v-for="row in usageUsers" :key="row.id" class="usage-user-card">
+              <div class="usage-user-heading">
+                <strong>{{ row.username }}</strong>
+                <t-tag :theme="statusTheme(row.subscription_status) as any" variant="light">
+                  {{ subscriptionStatusLabel(row.subscription_status) }}
+                </t-tag>
+              </div>
+              <dl>
+                <div><dt>邮箱</dt><dd>{{ row.email || '未绑定' }}<span v-if="row.email"> · {{ row.email_verified ? '已验证' : '待验证' }}</span></dd></div>
+                <div><dt>套餐</dt><dd>{{ row.plan_name }}</dd></div>
+                <div><dt>到期</dt><dd>{{ formatDateTime(row.subscription_ends_at) }}</dd></div>
+                <div><dt>分配时间</dt><dd>{{ formatDateTime(row.assigned_at) }}</dd></div>
+                <div><dt>最近使用</dt><dd>{{ formatDateTime(row.last_used_at) }}</dd></div>
+              </dl>
+            </article>
+          </div>
+
+          <div v-if="!usageLoading && !usageUsers.length" class="usage-empty">当前没有有效绑定用户</div>
+          <p class="usage-security-note">仅显示用户分配信息，不展示账号 Token、Cookie 或代理凭据。</p>
+        </div>
+      </t-loading>
+    </t-dialog>
   </div>
 </template>
 
@@ -105,12 +168,16 @@ import { formatDateTime, statusTheme } from '@/utils/billing'
 const loading = ref(false)
 const submitting = ref(false)
 const dialogVisible = ref(false)
+const usageVisible = ref(false)
+const usageLoading = ref(false)
 const policies = ref<any[]>([])
 const pools = ref<any[]>([])
 const accounts = ref<any[]>([])
 const plans = ref<any[]>([])
 const query = ref('')
 const tierFilter = ref('')
+const usagePolicy = ref<any>(null)
+const usageUsers = ref<any[]>([])
 
 const columns = [
   { colKey: 'account_name', title: '上游账号', minWidth: 210 },
@@ -119,7 +186,17 @@ const columns = [
   { colKey: 'bindings', title: '绑定人数', cell: 'bindings', width: 100 },
   { colKey: 'health', title: '健康状态', cell: 'health', width: 100 },
   { colKey: 'last_check', title: '最近检查', cell: 'last_check', width: 170 },
-  { colKey: 'op', title: '操作', cell: 'op', width: 130 }
+  { colKey: 'op', title: '操作', cell: 'op', width: 190 }
+]
+
+const usageColumns = [
+  { colKey: 'username', title: '用户名', minWidth: 130 },
+  { colKey: 'email', title: '验证邮箱', cell: 'email', minWidth: 190 },
+  { colKey: 'plan_name', title: '套餐', width: 120 },
+  { colKey: 'status', title: '状态', cell: 'status', width: 90 },
+  { colKey: 'ends_at', title: '到期时间', cell: 'ends_at', width: 150 },
+  { colKey: 'assigned_at', title: '分配时间', cell: 'assigned_at', width: 150 },
+  { colKey: 'last_used_at', title: '最近使用', cell: 'last_used_at', width: 150 }
 ]
 
 const form = reactive<any>({ id: 0, account_id: null, pool_id: null, tier: 'STANDARD', binding_limit: 5, enabled: true, health_status: 'HEALTHY' })
@@ -130,6 +207,7 @@ const filteredPolicies = computed(() => policies.value.filter(item => {
 }))
 
 const healthLabel = (value: string) => ({ HEALTHY: '健康', DEGRADED: '异常', DISABLED: '停用' }[value] || value)
+const subscriptionStatusLabel = (value: string) => ({ ACTIVE: '生效中', SUSPENDED: '已暂停', EXPIRED: '已到期', PENDING: '待生效' }[value] || value)
 
 const loadData = async () => {
   loading.value = true
@@ -167,13 +245,37 @@ const disablePolicy = async (row: any) => {
   }
 }
 
+const openUsage = async (row: any) => {
+  usagePolicy.value = { ...row }
+  usageUsers.value = []
+  usageVisible.value = true
+  usageLoading.value = true
+  try {
+    const data = await request(`/0x/admin/pools/${row.id}/usage`)
+    if (!data) {
+      usageVisible.value = false
+      return
+    }
+    usagePolicy.value = data.policy || row
+    usageUsers.value = data.users || []
+  } finally {
+    usageLoading.value = false
+  }
+}
+
+const closeUsage = () => {
+  usageVisible.value = false
+  usagePolicy.value = null
+  usageUsers.value = []
+}
+
 onMounted(loadData)
 </script>
 
 <style scoped>
-.pool-page { display: grid; gap: 20px; }
-.capacity-band { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); background: var(--app-surface); border: 1px solid var(--app-border); border-radius: 8px; }
-.capacity-item { padding: 20px 22px; border-right: 1px solid #e7e7e3; }
+.pool-page { display: grid; gap: 20px; min-width: 0; }
+.capacity-band { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 0; background: var(--app-surface); border: 1px solid var(--app-border); border-radius: 8px; }
+.capacity-item { min-width: 0; padding: 20px 22px; border-right: 1px solid #e7e7e3; }
 .capacity-item:last-child { border-right: 0; }
 .capacity-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .capacity-title strong { font-size: 16px; font-weight: 600; }
@@ -181,10 +283,42 @@ onMounted(loadData)
 .capacity-values span { display: block; color: var(--app-text-muted); font-size: 12px; }
 .capacity-values strong { display: block; margin-top: 7px; font-size: 24px; font-weight: 600; }
 .pool-list { margin-top: 14px; color: var(--app-text-muted); font-size: 12px; }
-.admin-section { padding: 22px 24px; background: var(--app-surface); border: 1px solid var(--app-border); border-radius: 8px; }
+.admin-section { min-width: 0; padding: 22px 24px; background: var(--app-surface); border: 1px solid var(--app-border); border-radius: 8px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .section-heading h2 { font-size: 18px; font-weight: 600; }
 .section-heading p { margin-top: 5px; color: var(--app-text-muted); font-size: 13px; }
 .toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 160px; gap: 10px; margin-bottom: 16px; }
-@media (max-width: 760px) { .capacity-band { grid-template-columns: 1fr; } .capacity-item { border-right: 0; border-bottom: 1px solid #e7e7e3; } .capacity-item:last-child { border-bottom: 0; } .admin-section { padding: 18px 14px; } .section-heading { align-items: flex-start; flex-direction: column; } .toolbar { grid-template-columns: 1fr; } }
+.policy-table-scroll { width: 100%; min-width: 0; max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
+.policy-table-scroll :deep(.t-table) { min-width: 1010px; }
+.usage-dialog { display: grid; gap: 16px; min-width: 0; }
+.usage-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--app-border); border-radius: 7px; }
+.usage-summary > div { min-width: 0; padding: 14px 16px; border-right: 1px solid var(--app-border); }
+.usage-summary > div:last-child { border-right: 0; }
+.usage-summary span { display: block; color: var(--app-text-muted); font-size: 12px; }
+.usage-summary strong { display: block; margin-top: 5px; overflow-wrap: anywhere; font-size: 15px; font-weight: 600; }
+.breakable { overflow-wrap: anywhere; }
+.email-usage-cell { display: grid; justify-items: start; gap: 5px; min-width: 0; }
+.mobile-usage-list { display: none; }
+.usage-empty { padding: 28px 16px; color: var(--app-text-muted); text-align: center; background: #f7f7f5; border: 1px dashed var(--app-border-strong); border-radius: 7px; }
+.usage-security-note { margin: 0; color: var(--app-text-muted); font-size: 12px; line-height: 1.5; }
+@media (max-width: 760px) {
+  .capacity-band { grid-template-columns: 1fr; }
+  .capacity-item { border-right: 0; border-bottom: 1px solid #e7e7e3; }
+  .capacity-item:last-child { border-bottom: 0; }
+  .admin-section { padding: 18px 14px; }
+  .section-heading { align-items: flex-start; flex-direction: column; }
+  .toolbar { grid-template-columns: 1fr; }
+  .usage-summary { grid-template-columns: 1fr; }
+  .usage-summary > div { border-right: 0; border-bottom: 1px solid var(--app-border); }
+  .usage-summary > div:last-child { border-bottom: 0; }
+  .desktop-usage-table { display: none; }
+  .mobile-usage-list { display: grid; gap: 10px; max-height: calc(100dvh - 330px); overflow: auto; }
+  .usage-user-card { display: grid; gap: 12px; min-width: 0; padding: 14px; background: #f7f7f5; border: 1px solid var(--app-border); border-radius: 7px; }
+  .usage-user-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .usage-user-heading strong { min-width: 0; overflow-wrap: anywhere; font-size: 14px; font-weight: 600; }
+  .usage-user-card dl { display: grid; gap: 8px; margin: 0; }
+  .usage-user-card dl div { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 8px; }
+  .usage-user-card dt { color: var(--app-text-muted); font-size: 12px; }
+  .usage-user-card dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: 12px; text-align: right; }
+}
 </style>

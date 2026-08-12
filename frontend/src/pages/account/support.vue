@@ -82,9 +82,9 @@ onMounted(loadData)
 .contact-value { overflow-wrap: anywhere; color: var(--app-text); font-size: 15px; font-weight: 600; }
 .contact-card p { color: var(--app-text-muted); font-size: 13px; line-height: 1.6; }
 .empty-state { padding: 30px 18px; color: var(--app-text-muted); font-size: 13px; text-align: center; background: #f7f7f5; border: 1px dashed var(--app-border-strong); border-radius: 7px; }
-.qr-dialog-content { display: grid; justify-items: center; gap: 10px; padding: 4px 0 12px; text-align: center; }
-.qr-dialog-content img { width: min(240px, 100%); aspect-ratio: 1; object-fit: contain; background: #fff; border: 1px solid var(--app-border); border-radius: 6px; }
-.qr-dialog-content strong { overflow-wrap: anywhere; font-size: 15px; font-weight: 600; }
-.qr-dialog-content span { color: var(--app-text-muted); font-size: 12px; }
-@media (max-width: 620px) { .support-page { padding: 18px 14px; } .section-heading { align-items: flex-start; flex-direction: column; } }
+.qr-dialog-content { display: grid; justify-items: center; gap: 10px; min-width: 0; padding: 4px 0 12px; text-align: center; }
+.qr-dialog-content img { display: block; width: auto; height: auto; max-width: 100%; max-height: calc(100dvh - 230px); object-fit: contain; object-position: center; background: #fff; border: 1px solid var(--app-border); border-radius: 6px; }
+.qr-dialog-content strong { max-width: 100%; overflow-wrap: anywhere; font-size: 15px; font-weight: 600; }
+.qr-dialog-content span { max-width: 100%; overflow-wrap: anywhere; color: var(--app-text-muted); font-size: 12px; }
+@media (max-width: 620px) { .support-page { padding: 18px 14px; } .section-heading { align-items: flex-start; flex-direction: column; } .qr-dialog-content img { max-height: calc(100dvh - 210px); } }
 </style>

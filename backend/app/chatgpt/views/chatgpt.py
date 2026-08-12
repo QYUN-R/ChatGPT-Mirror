@@ -13,7 +13,7 @@ from app.chatgpt.serializers import ShowChatgptTokenSerializer, AddChatgptTokenS
     RefreshChatgptTokenSerializer
 from app.page import DefaultPageNumberPagination
 from app.settings import CHATGPT_GATEWAY_URL
-from app.utils import get_request_subject, save_visit_log, req_gateway
+from app.utils import get_request_subject, redact_sensitive_data, save_visit_log, req_gateway
 from app.accounts.models import User
 from rest_framework.exceptions import ValidationError
 from django.utils import timezone
@@ -51,7 +51,10 @@ def build_token_expiry_result(account, now=None, error=""):
         "access_token_valid": account.access_token_valid,
         "session_token_valid": account.session_token_valid,
         "last_check_at": account.last_check_at,
-        "last_error": account.last_error or error,
+        "last_error": redact_sensitive_data(
+            account.last_error or error,
+            secrets=(account.access_token, account.session_token, account.refresh_token),
+        ),
         "has_refresh_token": bool(account.refresh_token),
     }
 
@@ -281,4 +284,9 @@ class ChatGPTLoginView(APIView):
         if managed_account:
             record_usage(request.user, chatgpt)
 
-        return Response(res_json)
+        safe_response = {
+            key: res_json[key]
+            for key in ("login_url", "message")
+            if key in res_json
+        }
+        return Response(safe_response)

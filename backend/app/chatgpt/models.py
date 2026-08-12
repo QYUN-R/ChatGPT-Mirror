@@ -55,7 +55,7 @@ class ChatgptAccount(models.Model):
         if not force and self.last_check_at and now - self.last_check_at < 3600:
             return
 
-        from app.utils import req_gateway
+        from app.utils import redact_sensitive_data, req_gateway
 
         result = req_gateway("post", "/api/diagnose-chatgpt-auth", json={
             "access_token": self.access_token,
@@ -65,7 +65,10 @@ class ChatgptAccount(models.Model):
         self.access_token_valid = bool(result.get("access_token_valid"))
         self.session_token_valid = bool(result.get("session_token_valid"))
         self.last_check_at = result.get("last_check_at") or now
-        self.last_error = result.get("last_error") or ""
+        self.last_error = str(redact_sensitive_data(
+            result.get("last_error") or "",
+            secrets=(self.access_token, self.session_token, self.refresh_token),
+        ))
 
         user_info = result.get("user_info") or {}
         if user_info.get("email"):

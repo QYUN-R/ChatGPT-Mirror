@@ -125,7 +125,7 @@
             </t-radio-group>
             <div class="plan-actions">
               <span>{{ selectedOffer(plan)?.months || 1 }} 个月有效期</span>
-              <t-button :theme="plan.pool_tier === 'PREMIUM' ? 'primary' : 'default'" variant="outline" :disabled="!purchaseUrl" @click="openPurchaseLink">
+              <t-button theme="primary" variant="outline" :disabled="!purchaseUrl" @click="openPurchaseLink">
                 购买对应卡密
               </t-button>
             </div>
@@ -279,8 +279,7 @@ onMounted(loadData)
 .redemption-form :deep(.t-input__inner) { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .redemption-hint { display: block; margin-top: 8px; color: var(--app-text-muted); font-size: 12px; }
 .plan-grid { display: grid; min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.plan-panel { display: grid; min-width: 0; min-height: 220px; padding: 22px; border: 1px solid var(--app-border-strong); border-radius: 8px; }
-.plan-panel.current { border-color: #91b7a0; box-shadow: inset 0 3px 0 #4f8061; }
+.plan-panel { display: grid; min-width: 0; min-height: 220px; padding: 22px; border: 1px solid #91b7a0; border-radius: 8px; box-shadow: inset 0 3px 0 #4f8061; }
 .plan-topline { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .plan-title-row { display: flex; align-items: center; gap: 10px; }
 .plan-topline h3 { margin: 0; font-size: 20px; font-weight: 600; }

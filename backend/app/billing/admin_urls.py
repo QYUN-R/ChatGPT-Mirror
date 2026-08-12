@@ -6,6 +6,7 @@ from app.billing.admin_views import (
     AdminOrderView,
     AdminPlanView,
     AdminPoolView,
+    AdminPoolUsageView,
     AdminRedemptionBatchView,
     AdminRedemptionCodeView,
     AdminRedemptionSettingsView,
@@ -17,6 +18,7 @@ from app.billing.admin_views import (
 urlpatterns = [
     path("plans", AdminPlanView.as_view()),
     path("pools", AdminPoolView.as_view()),
+    path("pools/<int:policy_id>/usage", AdminPoolUsageView.as_view()),
     path("subscriptions", AdminSubscriptionView.as_view()),
     path("orders", AdminOrderView.as_view()),
     path("redemption-settings", AdminRedemptionSettingsView.as_view()),

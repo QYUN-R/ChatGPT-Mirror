@@ -12,6 +12,13 @@ class ChatgptTokenAdmin(admin.ModelAdmin):
         "plan_type",
         "remark",
     )
+    exclude = (
+        "access_token",
+        "session_token",
+        "extra_cookies",
+        "refresh_token",
+        "refresh_client_id",
+    )
 
 
 @admin.register(ChatgptCar)

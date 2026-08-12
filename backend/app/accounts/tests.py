@@ -1,5 +1,6 @@
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from datetime import timedelta
+import json
 import random
 
 from celery.exceptions import Retry
@@ -45,7 +46,7 @@ from app.accounts.views.login import (
 from app.chatgpt.models import ChatgptAccount
 from app.chatgpt.serializers import ShowChatgptTokenSerializer
 from app.settings import ADMIN_USERNAME, FREE_ACCOUNT_USERNAME
-from app.utils import get_client_ip
+from app.utils import get_client_ip, req_gateway
 
 
 class SecurityRegressionTests(TestCase):
@@ -311,6 +312,7 @@ class SecurityRegressionTests(TestCase):
             refresh_token="secret-refresh",
             refresh_client_id="secret-client",
             extra_cookies=[{"name": "secret", "value": "cookie"}],
+            last_error="access_token=secret-access; cookie=secret-cookie-error",
             created_time=1,
             updated_time=1,
         )
@@ -323,6 +325,147 @@ class SecurityRegressionTests(TestCase):
             "extra_cookies",
         ):
             self.assertNotIn(field, data)
+        self.assertNotIn("secret-access", data["last_error"])
+        self.assertNotIn("secret-cookie-error", data["last_error"])
+
+    @patch("app.chatgpt.views.chatgpt.req_gateway")
+    def test_refresh_token_import_still_works_without_echoing_credentials(self, gateway):
+        submitted_refresh = "submitted-refresh-secret-123456"
+        imported_access = "imported-access-secret-123456"
+        rotated_refresh = "rotated-refresh-secret-123456"
+        gateway.side_effect = [
+            {
+                "user_info": {"email": "imported@example.com", "plan_type": "plus"},
+                "access_token": imported_access,
+                "refresh_token": rotated_refresh,
+                "refresh_client_id": "app-test-client",
+                "extra_cookies": [],
+                "access_token_valid": True,
+                "session_token_valid": False,
+                "last_check_at": int(timezone.now().timestamp()),
+            },
+            {},
+        ]
+        admin = User.objects.create_superuser(
+            username="credential-admin",
+            password="Strong-password-123!",
+        )
+        client = APIClient()
+        client.force_authenticate(admin)
+
+        response = client.post(
+            "/0x/chatgpt/",
+            {
+                "auth_type": "refresh_token",
+                "client_id": "app-test-client",
+                "refresh_token": submitted_refresh,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            gateway.call_args_list[0].kwargs["json"]["refresh_token"],
+            submitted_refresh,
+        )
+        account = ChatgptAccount.objects.get(chatgpt_username="imported@example.com")
+        self.assertEqual(account.access_token, imported_access)
+        self.assertEqual(account.refresh_token, rotated_refresh)
+        rendered = json.dumps(response.data, ensure_ascii=False)
+        for secret in (submitted_refresh, imported_access, rotated_refresh):
+            self.assertNotIn(secret, rendered)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT access_token, refresh_token FROM chatgpt_chatgptaccount WHERE id = %s",
+                [account.id],
+            )
+            stored_access, stored_refresh = cursor.fetchone()
+        self.assertTrue(stored_access.startswith("enc:v1:"))
+        self.assertTrue(stored_refresh.startswith("enc:v1:"))
+        self.assertNotIn(imported_access, stored_access)
+        self.assertNotIn(rotated_refresh, stored_refresh)
+
+    @patch("app.utils.requests.request")
+    def test_gateway_errors_redact_submitted_credentials(self, request_mock):
+        submitted_token = "submitted-token-secret-123456"
+        submitted_cookie = "submitted-cookie-secret-123456"
+        response = Mock(status_code=400, text="")
+        response.json.return_value = {
+            "message": (
+                f"access_token={submitted_token}; "
+                f"cookie={submitted_cookie}; Authorization: Bearer abcdefghijklmnop"
+            )
+        }
+        request_mock.return_value = response
+
+        with self.assertRaises(ValidationError) as captured:
+            req_gateway(
+                "post",
+                "/api/get-user-info",
+                json={
+                    "chatgpt_token": submitted_token,
+                    "cookie": submitted_cookie,
+                },
+            )
+
+        rendered = json.dumps(captured.exception.detail, ensure_ascii=False)
+        self.assertNotIn(submitted_token, rendered)
+        self.assertNotIn(submitted_cookie, rendered)
+        self.assertNotIn("abcdefghijklmnop", rendered)
+        self.assertIn("[redacted]", rendered)
+
+    @patch("app.chatgpt.views.chatgpt.req_gateway")
+    @patch("app.chatgpt.views.chatgpt.resolve_managed_account")
+    def test_chatgpt_login_response_does_not_echo_upstream_credentials(
+        self,
+        resolve_account,
+        gateway,
+    ):
+        account = ChatgptAccount.objects.create(
+            chatgpt_username="managed-login@example.com",
+            plan_type="plus",
+            access_token="login-access-secret-123456",
+            session_token="login-session-secret-123456",
+            access_token_valid=True,
+            session_token_valid=True,
+            created_time=1,
+            updated_time=1,
+        )
+        resolve_account.return_value = account
+        gateway.return_value = {
+            "login_url": "https://www.tuwugpt.com/session/ready",
+            "message": "ok",
+            "access_token": account.access_token,
+            "session_token": account.session_token,
+            "cookie": "gateway-cookie-secret-123456",
+        }
+        user = User.objects.create_user(
+            username="managed-login-user",
+            password="Strong-password-123!",
+        )
+        request = self.factory.post(
+            "/0x/chatgpt/login",
+            {"login_mode": "web"},
+            format="json",
+        )
+        force_authenticate(request, user=user)
+
+        from app.chatgpt.views.chatgpt import ChatGPTLoginView
+
+        response = ChatGPTLoginView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data,
+            {
+                "login_url": "https://www.tuwugpt.com/session/ready",
+                "message": "ok",
+            },
+        )
+        rendered = json.dumps(response.data, ensure_ascii=False)
+        self.assertNotIn(account.access_token, rendered)
+        self.assertNotIn(account.session_token, rendered)
+        self.assertNotIn("gateway-cookie-secret-123456", rendered)
 
     def test_clear_visit_logs_preserves_admin_login_logs(self):
         admin = User.objects.create_superuser(username="log-admin", password="password-123")

@@ -15,6 +15,7 @@ from rest_framework.views import APIView
 from app.accounts.models import User
 from app.billing.exceptions import BillingError
 from app.billing.models import (
+    AccountAssignment,
     Announcement,
     AuditLog,
     CommercialSettings,
@@ -30,6 +31,7 @@ from app.billing.models import (
 )
 from app.billing.payment import PaymentEvent
 from app.billing.serializers import (
+    AccountAssignmentUsageSerializer,
     AnnouncementSerializer,
     AuditLogSerializer,
     CommercialSettingsSerializer,
@@ -192,7 +194,13 @@ class AdminPoolView(APIView):
     permission_classes = (IsAuthenticated, IsAdminUser)
 
     def get(self, request):
-        policies = PoolAccountPolicy.objects.select_related("pool", "account").all()
+        policies = PoolAccountPolicy.objects.select_related("pool", "account").annotate(
+            active_bindings_count=Count(
+                "account__billing_assignments",
+                filter=Q(account__billing_assignments__active=True),
+                distinct=True,
+            )
+        )
         return Response({
             "policies": PoolPolicySerializer(policies, many=True).data,
             "pools": list(ChatgptCar.objects.values("id", "car_name").order_by("car_name")),
@@ -237,6 +245,26 @@ class AdminPoolView(APIView):
             pool.save(update_fields=["gpt_account_list", "updated_time"])
             return Response({"message": "账号策略已停用"})
         raise ValidationError({"message": "未知操作"})
+
+
+class AdminPoolUsageView(APIView):
+    permission_classes = (IsAuthenticated, IsAdminUser)
+
+    def get(self, request, policy_id):
+        policy = get_object_or_404(
+            PoolAccountPolicy.objects.select_related("pool", "account"),
+            pk=policy_id,
+        )
+        assignments = AccountAssignment.objects.filter(
+            account=policy.account,
+            active=True,
+        ).select_related("user", "subscription", "subscription__plan").order_by(
+            "-last_used_at", "-assigned_at", "-id"
+        )
+        return Response({
+            "policy": PoolPolicySerializer(policy).data,
+            "users": AccountAssignmentUsageSerializer(assignments, many=True).data,
+        })
 
 
 class AdminSubscriptionView(APIView):

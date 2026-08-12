@@ -114,7 +114,7 @@
       header="添加上游账号"
       :confirm-btn="{ loading: submitLoading }"
       @confirm="handleAdd"
-      @close="addDialogVisible = false"
+      @close="closeAddDialog"
       width="600px"
     >
       <t-form :data="addFormData" ref="addFormRef" label-width="120px">
@@ -129,6 +129,8 @@
           <t-form-item label="Token 列表" name="chatgpt_token_list">
             <t-textarea
               v-model="tokenInput"
+              autocomplete="off"
+              :spellcheck="false"
               placeholder="支持直接粘贴 AccessToken、SessionToken、完整 Cookie 文本或 Netscape HTTP Cookie File"
               :autosize="{ minRows: 5, maxRows: 10 }"
             />
@@ -149,6 +151,8 @@
           <t-form-item label="RefreshToken" name="refresh_token">
             <t-textarea
               v-model="refreshTokenInput"
+              autocomplete="off"
+              :spellcheck="false"
               placeholder="请输入有效 refresh_token"
               :autosize="{ minRows: 4, maxRows: 8 }"
             />
@@ -191,7 +195,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import request from '@/api/request'
 
@@ -250,6 +254,13 @@ const editFormData = reactive({
   chatgpt_username: '',
   remark: '',
   proxy_node_id: null as number | null
+})
+
+watch(authInputType, () => {
+  tokenInput.value = ''
+  refreshTokenInput.value = ''
+  addFormData.chatgpt_token_list = []
+  addFormData.auth_type = authInputType.value
 })
 
 onMounted(() => {
@@ -354,6 +365,18 @@ const showAddDialog = () => {
   addDialogVisible.value = true
 }
 
+const clearCredentialInputs = () => {
+  tokenInput.value = ''
+  refreshTokenInput.value = ''
+  addFormData.chatgpt_token_list = []
+}
+
+const closeAddDialog = () => {
+  clearCredentialInputs()
+  refreshClientId.value = DEFAULT_REFRESH_CLIENT_ID
+  addDialogVisible.value = false
+}
+
 const showEditDialog = (row: any) => {
   editFormData.chatgpt_username = row.chatgpt_username
   editFormData.remark = row.remark || ''
@@ -400,16 +423,21 @@ const handleAdd = async () => {
     }
 
     submitLoading.value = true
-    const data = await request('/0x/chatgpt', 'POST', {
-      auth_type: 'refresh_token',
-      client_id: clientId,
-      refresh_token: refreshToken
-    })
-    submitLoading.value = false
+    let data = null
+    try {
+      data = await request('/0x/chatgpt', 'POST', {
+        auth_type: 'refresh_token',
+        client_id: clientId,
+        refresh_token: refreshToken
+      })
+    } finally {
+      refreshTokenInput.value = ''
+      submitLoading.value = false
+    }
 
     if (data) {
       MessagePlugin.success(data.message || '添加成功')
-      addDialogVisible.value = false
+      closeAddDialog()
       fetchData()
     }
     return
@@ -422,10 +450,17 @@ const handleAdd = async () => {
   }
 
   submitLoading.value = true
-  const data = await request('/0x/chatgpt', 'POST', {
-    chatgpt_token_list: tokens
-  })
-  submitLoading.value = false
+  let data = null
+  try {
+    data = await request('/0x/chatgpt', 'POST', {
+      chatgpt_token_list: tokens
+    })
+  } finally {
+    tokenInput.value = ''
+    addFormData.chatgpt_token_list = []
+    tokens.fill('')
+    submitLoading.value = false
+  }
 
   if (data) {
     if (data.errors?.length) {
@@ -433,7 +468,7 @@ const handleAdd = async () => {
     } else {
       MessagePlugin.success(data.message || '添加成功')
     }
-    addDialogVisible.value = false
+    closeAddDialog()
     fetchData()
   }
 }

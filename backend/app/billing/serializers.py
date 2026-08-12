@@ -350,7 +350,36 @@ class PoolPolicySerializer(serializers.ModelSerializer):
         )
 
     def get_active_bindings(self, obj):
+        annotated_count = getattr(obj, "active_bindings_count", None)
+        if annotated_count is not None:
+            return annotated_count
         return obj.account.billing_assignments.filter(active=True).count()
+
+
+class AccountAssignmentUsageSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source="user.username", read_only=True)
+    email = serializers.EmailField(source="user.email", read_only=True)
+    email_verified = serializers.SerializerMethodField()
+    plan_name = serializers.CharField(source="subscription.plan.name", read_only=True)
+    subscription_status = serializers.CharField(source="subscription.status", read_only=True)
+    subscription_ends_at = serializers.DateTimeField(source="subscription.ends_at", read_only=True)
+
+    class Meta:
+        model = AccountAssignment
+        fields = (
+            "id",
+            "username",
+            "email",
+            "email_verified",
+            "plan_name",
+            "subscription_status",
+            "subscription_ends_at",
+            "assigned_at",
+            "last_used_at",
+        )
+
+    def get_email_verified(self, obj):
+        return bool(obj.user.email and obj.user.email_verified_at)
 
 
 class NotificationSerializer(serializers.ModelSerializer):

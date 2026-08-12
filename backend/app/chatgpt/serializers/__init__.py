@@ -2,7 +2,7 @@ from rest_framework import serializers
 
 from app.chatgpt.models import ChatgptAccount, ChatgptCar
 import jwt
-from app.utils import clean_int_list
+from app.utils import clean_int_list, redact_sensitive_data
 import time
 
 class ShowGptCarSerializer(serializers.ModelSerializer):
@@ -42,6 +42,7 @@ class ShowChatgptTokenSerializer(serializers.ModelSerializer):
     use_count = serializers.SerializerMethodField()
     supported_login_modes = serializers.SerializerMethodField()
     has_refresh_token = serializers.SerializerMethodField()
+    last_error = serializers.SerializerMethodField()
 
     def __init__(self, *args, use_count_dict=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -67,6 +68,12 @@ class ShowChatgptTokenSerializer(serializers.ModelSerializer):
 
     def get_has_refresh_token(self, obj):
         return bool(obj.refresh_token)
+
+    def get_last_error(self, obj):
+        return redact_sensitive_data(
+            obj.last_error or "",
+            secrets=(obj.access_token, obj.session_token, obj.refresh_token),
+        )
 
     class Meta:
         model = ChatgptAccount

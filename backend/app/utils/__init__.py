@@ -1,6 +1,7 @@
 import hashlib
 import ipaddress
 import json
+import re
 import time
 import uuid
 
@@ -17,6 +18,28 @@ from app.settings import GATEWAY_ADMIN_SECRET
 
 FREE_SESSION_SALT = "chatgpt-mirror.free-session.v1"
 FREE_SESSION_MAX_AGE = 7 * 24 * 60 * 60
+SENSITIVE_KEY_FRAGMENTS = (
+    "token",
+    "secret",
+    "credential",
+    "access_token",
+    "session_token",
+    "refresh_token",
+    "client_secret",
+    "private_key",
+    "password",
+    "cookie",
+    "authorization",
+)
+SENSITIVE_TEXT_PATTERNS = (
+    re.compile(r"(?i)bearer\s+[a-z0-9._~+/=-]{12,}"),
+    re.compile(r"\beyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b"),
+    re.compile(r"\b(?:sk|sess)-[a-zA-Z0-9_-]{12,}\b"),
+    re.compile(
+        r"(?i)((?:access|session|refresh|chatgpt)?[_-]?token|cookie|authorization|password|secret)"
+        r"(\s*[:=]\s*)([^\s,;]+)"
+    ),
+)
 
 
 def generate_md5(input_string):
@@ -91,6 +114,35 @@ def issue_free_session():
     return signing.dumps({"sid": uuid.uuid4().hex}, salt=FREE_SESSION_SALT, compress=True)
 
 
+def redact_sensitive_data(value, *, secrets=()):
+    secret_values = tuple(
+        str(item) for item in secrets if item is not None and len(str(item)) >= 6
+    )
+    if isinstance(value, dict):
+        return {
+            str(key): "[redacted]"
+            if any(fragment in str(key).lower() for fragment in SENSITIVE_KEY_FRAGMENTS)
+            else redact_sensitive_data(item, secrets=secret_values)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_sensitive_data(item, secrets=secret_values) for item in value[:100]]
+    if isinstance(value, tuple):
+        return tuple(redact_sensitive_data(item, secrets=secret_values) for item in value[:100])
+    if isinstance(value, str):
+        redacted = value
+        for secret in secret_values:
+            redacted = redacted.replace(secret, "[redacted]")
+        redacted = SENSITIVE_TEXT_PATTERNS[0].sub("Bearer [redacted]", redacted)
+        redacted = SENSITIVE_TEXT_PATTERNS[1].sub("[redacted]", redacted)
+        redacted = SENSITIVE_TEXT_PATTERNS[2].sub("[redacted]", redacted)
+        redacted = SENSITIVE_TEXT_PATTERNS[3].sub(r"\1\2[redacted]", redacted)
+        return redacted[:2000]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return redact_sensitive_data(str(value), secrets=secret_values)
+
+
 def get_request_subject(request):
     if request.user.username != FREE_ACCOUNT_USERNAME:
         return request.user.username
@@ -126,7 +178,16 @@ def req_gateway(method, uri, *args, **kwargs):
         except:
             err_msg = res.text
 
-        raise ValidationError(err_msg)
+        request_json = kwargs.get("json") or {}
+        request_secrets = []
+        if isinstance(request_json, dict):
+            for key, value in request_json.items():
+                if any(fragment in str(key).lower() for fragment in SENSITIVE_KEY_FRAGMENTS):
+                    if isinstance(value, (list, tuple)):
+                        request_secrets.extend(value)
+                    else:
+                        request_secrets.append(value)
+        raise ValidationError(redact_sensitive_data(err_msg, secrets=request_secrets))
 
     return res.json()
 

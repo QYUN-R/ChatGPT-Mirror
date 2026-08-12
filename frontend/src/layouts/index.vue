@@ -6,7 +6,7 @@
           <div class="brand-lockup">
             <t-icon class="brand-icon" name="dashboard" />
             <div class="brand-copy">
-              <strong>Chat2</strong>
+              <strong>tuwugpt</strong>
               <span>{{ isAdmin ? '管理后台' : '用户中心' }}</span>
             </div>
           </div>
@@ -55,10 +55,6 @@
             <h1>{{ pageTitle }}</h1>
           </div>
           <div class="header-right">
-            <t-button v-if="!isAdmin" class="service-entry" variant="outline" @click="enterService">
-              <template #icon><t-icon name="play-circle" /></template>
-              进入使用页面
-            </t-button>
             <t-dropdown :options="userOptions" @click="handleUserAction">
               <t-button class="user-button" variant="text">
                 <t-icon name="user-circle" />
@@ -195,11 +191,6 @@ const acknowledgeRequiredNotification = async () => {
   acknowledgingNotification.value = false
   if (!data) return
   requiredNotifications.value.shift()
-}
-
-const enterService = async () => {
-  if (requiredNotification.value) return
-  await router.push({ name: 'LoginChatgpt' })
 }
 
 const handleUserAction = (data: { value: string }) => {
@@ -393,7 +384,6 @@ watch(() => route.fullPath, () => { mobileMenuOpen.value = false })
   gap: 8px;
 }
 
-.service-entry { border-radius: 7px; }
 
 .user-button {
   color: #4f4f4b;
@@ -518,7 +508,6 @@ watch(() => route.fullPath, () => { mobileMenuOpen.value = false })
     font-size: 0;
   }
 
-  .service-entry { width: 40px; padding: 0; font-size: 0; }
 
   .user-button :deep(.t-icon) {
     font-size: 18px;
