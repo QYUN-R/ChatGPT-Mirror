@@ -22,6 +22,7 @@
         <t-option value="alipay" label="支付宝" />
         <t-option value="manual" label="人工" />
         <t-option value="mock" label="模拟" />
+        <t-option value="redemption_code" label="卡密兑换" />
       </t-select>
       <t-button variant="outline" @click="applyFilter">查询</t-button>
     </div>
@@ -36,14 +37,14 @@
         <template #paid_at="{ row }">{{ formatDateTime(row.paid_at) }}</template>
         <template #op="{ row }">
           <t-space size="small">
-            <t-popconfirm v-if="row.status === 'PENDING' && row.provider !== 'alipay'" content="确认已线下收款并开通套餐？" @confirm="action(row, 'mark_paid')">
+            <t-popconfirm v-if="row.status === 'PENDING' && !['alipay', 'redemption_code'].includes(row.provider)" content="确认已线下收款并开通套餐？" @confirm="action(row, 'mark_paid')">
               <t-link theme="primary">确认收款</t-link>
             </t-popconfirm>
             <t-link v-if="row.status === 'PENDING' && row.provider === 'alipay'" theme="primary" @click="action(row, 'sync')">同步支付</t-link>
             <t-popconfirm v-if="row.status === 'PENDING'" content="关闭后将释放预留席位" @confirm="action(row, 'close')">
               <t-link theme="danger">关闭</t-link>
             </t-popconfirm>
-            <t-popconfirm v-if="row.status === 'PAID' && row.provider !== 'alipay'" content="退款会立即暂停当前套餐权益" @confirm="action(row, 'refund')">
+            <t-popconfirm v-if="row.status === 'PAID' && !['alipay', 'redemption_code'].includes(row.provider)" content="退款会立即暂停当前套餐权益" @confirm="action(row, 'refund')">
               <t-link theme="danger">退款</t-link>
             </t-popconfirm>
             <t-link theme="default" @click="openDetail(row)">支付详情</t-link>
@@ -104,7 +105,7 @@ const transactionColumns = [
   { colKey: 'occurred_at', title: '时间', cell: 'occurred_at', width: 170 }
 ]
 
-const providerLabel = (provider: string) => provider === 'alipay' ? '支付宝' : provider === 'manual' ? '人工' : provider === 'mock' ? '模拟' : provider
+const providerLabel = (provider: string) => provider === 'alipay' ? '支付宝' : provider === 'manual' ? '人工' : provider === 'mock' ? '模拟' : provider === 'redemption_code' ? '卡密兑换' : provider
 
 const loadData = async () => {
   loading.value = true

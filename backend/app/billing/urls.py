@@ -10,12 +10,14 @@ from app.billing.views import (
     OrderPaymentSyncView,
     OrderRenewView,
     PlanListView,
+    RedemptionCodeRedeemView,
     SupportContactListView,
 )
 
 
 urlpatterns = [
     path("plans", PlanListView.as_view()),
+    path("redemption-codes/redeem", RedemptionCodeRedeemView.as_view()),
     path("me", BillingMeView.as_view()),
     path("orders", OrderListCreateView.as_view()),
     path("orders/<int:order_id>/renew", OrderRenewView.as_view()),

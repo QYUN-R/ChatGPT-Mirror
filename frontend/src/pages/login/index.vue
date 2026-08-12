@@ -90,7 +90,7 @@
                   variant="outline"
                   class="verification-button"
                   :loading="verificationSending"
-                  :disabled="loading || verificationSending || cooldown > 0 || (turnstileEnabled && !turnstileToken)"
+                  :disabled="loading || verificationSending || cooldown > 0 || !humanVerificationReady"
                   @click="requestVerificationCode"
                 >
                   {{ cooldown > 0 ? `${cooldown}s 后重发` : '发送验证码' }}
@@ -117,12 +117,39 @@
             <p v-if="turnstileError" class="turnstile-error" role="alert">{{ turnstileError }}</p>
           </div>
 
+          <div v-else-if="localCaptchaEnabled" class="local-captcha-field">
+            <label for="local-captcha-answer">图形验证码</label>
+            <div class="local-captcha-row">
+              <t-input
+                id="local-captcha-answer"
+                v-model="localCaptchaAnswer"
+                autocomplete="off"
+                autocapitalize="characters"
+                maxlength="6"
+                placeholder="输入 6 位字符"
+                size="large"
+              />
+              <button
+                type="button"
+                class="local-captcha-image"
+                :disabled="localCaptchaLoading"
+                aria-label="刷新图形验证码"
+                title="点击刷新"
+                @click="loadLocalCaptcha"
+              >
+                <img v-if="localCaptchaImage" :src="localCaptchaImage" alt="图形验证码，点击刷新" />
+                <span v-else>{{ localCaptchaLoading ? '加载中' : '点击刷新' }}</span>
+              </button>
+            </div>
+            <p class="captcha-hint">看不清可点击图片刷新</p>
+          </div>
+
           <t-form-item class="submit-item">
             <t-button
               type="submit"
               size="large"
               class="login-button"
-              :disabled="turnstileEnabled && !turnstileToken && needsTurnstileForSubmit"
+              :disabled="submitDisabled"
             >
               {{ pageCopy.submit }}
             </t-button>
@@ -152,7 +179,7 @@
         <button
           class="free-button"
           type="button"
-          :disabled="loading || (turnstileEnabled && !turnstileToken)"
+          :disabled="loading || !humanVerificationReady"
           @click="goFree"
         >
           免费体验
@@ -196,7 +223,8 @@ const cfg = ref({
   email_verification_enabled: false,
   notice: '',
   turnstile_enabled: false,
-  turnstile_site_key: ''
+  turnstile_site_key: '',
+  local_captcha_enabled: false
 })
 const form = reactive({
   identifier: '',
@@ -211,6 +239,10 @@ const turnstileContainer = ref<HTMLElement | null>(null)
 const turnstileToken = ref('')
 const turnstileError = ref('')
 const turnstileWidgetId = ref<string | null>(null)
+const localCaptchaToken = ref('')
+const localCaptchaImage = ref('')
+const localCaptchaAnswer = ref('')
+const localCaptchaLoading = ref(false)
 let turnstileScriptPromise: Promise<void> | null = null
 let cooldownTimer: number | null = null
 let verificationDeliveryTimer: number | null = null
@@ -224,6 +256,7 @@ const needsEmail = computed(() => !isLogin.value)
 const needsCurrentPassword = computed(() => isLogin.value || isRegister.value)
 const needsVerificationCode = computed(() => isRegister.value || isForgotPassword.value || isBinding.value)
 const turnstileEnabled = computed(() => cfg.value.turnstile_enabled && Boolean(cfg.value.turnstile_site_key))
+const localCaptchaEnabled = computed(() => cfg.value.local_captcha_enabled)
 const turnstileAction = computed(() => {
   if (isRegister.value) return 'register'
   if (isForgotPassword.value) return 'password_reset'
@@ -231,11 +264,22 @@ const turnstileAction = computed(() => {
   return 'login'
 })
 const needsTurnstileForSubmit = computed(() => isLogin.value)
+const humanVerificationReady = computed(() => {
+  if (localCaptchaEnabled.value) {
+    return Boolean(localCaptchaToken.value && localCaptchaAnswer.value.trim().length === 6)
+  }
+  if (turnstileEnabled.value) return Boolean(turnstileToken.value)
+  return true
+})
 const pageCopy = computed(() => {
   if (isRegister.value) return { title: '创建账户', description: '验证邮箱后即可完成注册', submit: '创建账户' }
   if (isForgotPassword.value) return { title: '重置密码', description: '验证邮箱后设置新的登录密码', submit: '重置密码' }
   if (isBinding.value) return { title: '绑定邮箱', description: '完成验证后继续使用此账户', submit: '完成绑定' }
   return { title: '欢迎回来', description: '使用邮箱登录，旧账号可继续使用用户名', submit: '登录' }
+})
+const submitDisabled = computed(() => {
+  if (localCaptchaEnabled.value) return !humanVerificationReady.value
+  return needsTurnstileForSubmit.value && !humanVerificationReady.value
 })
 const rules = computed(() => {
   const fieldRules: Record<string, unknown[]> = {}
@@ -291,6 +335,42 @@ const removeTurnstile = () => {
 const resetTurnstile = () => {
   turnstileToken.value = ''
   if (turnstileWidgetId.value && window.turnstile) window.turnstile.reset(turnstileWidgetId.value)
+}
+
+const loadLocalCaptcha = async () => {
+  if (!localCaptchaEnabled.value) return
+  localCaptchaLoading.value = true
+  localCaptchaAnswer.value = ''
+  try {
+    const response = await fetch(`/0x/user/captcha?action=${encodeURIComponent(turnstileAction.value)}`, {
+      credentials: 'include',
+      cache: 'no-store'
+    })
+    if (!response.ok) throw new Error('captcha unavailable')
+    const data = await response.json()
+    localCaptchaToken.value = data.captcha_token || ''
+    localCaptchaImage.value = data.image_data_url || ''
+  } catch {
+    localCaptchaToken.value = ''
+    localCaptchaImage.value = ''
+    MessagePlugin.error('图形验证码加载失败，请点击重试')
+  } finally {
+    localCaptchaLoading.value = false
+  }
+}
+
+const humanVerificationPayload = () => ({
+  turnstile_token: turnstileToken.value,
+  captcha_token: localCaptchaToken.value,
+  captcha_answer: localCaptchaAnswer.value.trim().toUpperCase()
+})
+
+const resetHumanVerification = async () => {
+  if (localCaptchaEnabled.value) {
+    await loadLocalCaptcha()
+    return
+  }
+  resetTurnstile()
 }
 
 const renderTurnstile = async () => {
@@ -364,7 +444,7 @@ const requestVerificationCode = async () => {
     MessagePlugin.warning('请先输入有效邮箱')
     return
   }
-  if (turnstileEnabled.value && !turnstileToken.value) {
+  if (!humanVerificationReady.value) {
     MessagePlugin.warning('请完成人机验证')
     return
   }
@@ -376,7 +456,7 @@ const requestVerificationCode = async () => {
       : '/0x/user/email-binding/request'
   const payload: Record<string, string> = {
     email: form.email.trim(),
-    turnstile_token: turnstileToken.value
+    ...humanVerificationPayload()
   }
   if (isBinding.value) payload.binding_ticket = sessionStorage.getItem(BINDING_TICKET_STORAGE_KEY) || ''
 
@@ -387,7 +467,7 @@ const requestVerificationCode = async () => {
     verificationDeliveryMessage.value = data.challenge_id ? '验证码正在发送，请稍候' : '验证码正在发送，请查收邮箱'
     MessagePlugin.success(data.message || '验证码已进入发送队列')
     startCooldown()
-    resetTurnstile()
+    await resetHumanVerification()
     if (data.challenge_id) watchVerificationDelivery(data.challenge_id)
   }
 }
@@ -397,23 +477,12 @@ const goAfterAuthentication = async () => {
     await router.push({ name: 'User' })
     return
   }
-  let billing: any = null
-  try {
-    const response = await fetch('/0x/billing/me', { credentials: 'include' })
-    if (response.ok) billing = await response.json()
-  } catch {
-    billing = null
-  }
-  if (billing?.enabled && !billing.service_available && (billing.enforced || billing.subscription || isRegister.value)) {
-    await router.push({ name: 'Billing' })
-    return
-  }
-  await router.push({ name: 'LoginChatgpt' })
+  await router.push({ name: 'Billing' })
 }
 
 const onSubmit = async ({ validateResult }: any) => {
   if (validateResult !== true) return
-  if (turnstileEnabled.value && needsTurnstileForSubmit.value && !turnstileToken.value) {
+  if (submitDisabled.value) {
     MessagePlugin.warning('请完成人机验证')
     return
   }
@@ -424,7 +493,7 @@ const onSubmit = async ({ validateResult }: any) => {
       const data = await userStore.login('/0x/user/login', {
         identifier: form.identifier.trim(),
         password: form.password,
-        turnstile_token: turnstileToken.value
+        ...humanVerificationPayload()
       })
       if (data.email_binding_required && data.binding_ticket) {
         sessionStorage.setItem(BINDING_TICKET_STORAGE_KEY, data.binding_ticket)
@@ -475,24 +544,24 @@ const onSubmit = async ({ validateResult }: any) => {
     }
   } catch (error: any) {
     MessagePlugin.error(error.message || '操作失败')
-    resetTurnstile()
+    await resetHumanVerification()
   } finally {
     loading.value = false
   }
 }
 
 const goFree = async () => {
-  if (turnstileEnabled.value && !turnstileToken.value) {
+  if (!humanVerificationReady.value) {
     MessagePlugin.warning('请完成人机验证')
     return
   }
   loading.value = true
   try {
-    const data = await userStore.login('/0x/user/login-free', { turnstile_token: turnstileToken.value })
+    const data = await userStore.login('/0x/user/login-free', humanVerificationPayload())
     if (data.authenticated) await router.push({ name: 'LoginChatgpt' })
   } catch (error: any) {
     MessagePlugin.error(error.message || '免费体验暂不可用')
-    resetTurnstile()
+    await resetHumanVerification()
   } finally {
     loading.value = false
   }
@@ -516,10 +585,15 @@ onMounted(async () => {
     return
   }
   await getVersionCfg()
-  await renderTurnstile()
+  if (localCaptchaEnabled.value) await loadLocalCaptcha()
+  else await renderTurnstile()
 })
 
 watch(turnstileAction, async () => {
+  if (localCaptchaEnabled.value) {
+    await loadLocalCaptcha()
+    return
+  }
   if (!turnstileEnabled.value) return
   removeTurnstile()
   await renderTurnstile()
@@ -573,6 +647,17 @@ onBeforeUnmount(() => {
 .turnstile-field { min-height: 65px; margin-top: 4px; }
 .turnstile-widget { width: 100%; min-height: 65px; }
 .turnstile-error { margin: 8px 0 0; color: #a3413a; font-size: 13px; line-height: 1.5; }
+.local-captcha-field { margin-top: 4px; }
+.local-captcha-field > label { display: inline-block; margin-bottom: 8px; color: #373735; font-size: 14px; font-weight: 500; line-height: 20px; }
+.local-captcha-row { display: grid; grid-template-columns: minmax(0, 1fr) 192px; gap: 10px; }
+.local-captcha-row :deep(.t-input) { min-height: 56px; padding: 0 14px; background: var(--login-surface); border-color: var(--login-border); border-radius: 8px; }
+.local-captcha-row :deep(.t-input__inner) { text-transform: uppercase; }
+.local-captcha-image { display: grid; width: 192px; aspect-ratio: 3 / 1; min-height: 64px; height: auto; padding: 0; overflow: hidden; cursor: pointer; background: #f2f2ef; border: 1px solid var(--login-border); border-radius: 8px; place-items: center; }
+.local-captcha-image:hover:not(:disabled) { border-color: var(--login-border-hover); }
+.local-captcha-image:disabled { cursor: wait; opacity: 0.7; }
+.local-captcha-image img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.local-captcha-image span { color: var(--login-muted); font-size: 13px; }
+.captcha-hint { margin: 7px 0 0; color: var(--login-muted); font-size: 12px; line-height: 1.5; }
 .submit-item { margin: 28px 0 0; }
 .login-button { width: 100%; height: 50px; color: #f9f9f7; font-size: 15px; font-weight: 600; background: var(--login-action); border-color: var(--login-action); border-radius: 8px; box-shadow: none; }
 .login-button:hover { background: #3a3a37; border-color: #3a3a37; }
@@ -584,6 +669,6 @@ onBeforeUnmount(() => {
 .free-button { width: 100%; height: 50px; padding: 0 16px; color: var(--login-text); font: inherit; font-size: 15px; font-weight: 500; cursor: pointer; background: var(--login-surface); border: 1px solid var(--login-border); border-radius: 8px; }
 .free-button:hover:not(:disabled) { background: #efefec; border-color: var(--login-border-hover); }
 .free-button:disabled { cursor: not-allowed; opacity: 0.5; }
-@media (max-width: 520px) { .login-page { align-items: flex-start; padding: 72px 24px 40px; } .login-header { margin-bottom: 28px; } .login-header h1 { font-size: 28px; } .verification-row { grid-template-columns: 1fr; } .verification-button { width: 100%; } }
+@media (max-width: 520px) { .login-page { align-items: flex-start; padding: 72px 24px 40px; } .login-header { margin-bottom: 28px; } .login-header h1 { font-size: 28px; } .verification-row { grid-template-columns: 1fr; } .verification-button { width: 100%; } .local-captcha-row { grid-template-columns: 1fr; } .local-captcha-image { width: 100%; min-height: 0; } }
 @media (prefers-reduced-motion: reduce) { .login-page *, .login-page *::before, .login-page *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; } }
 </style>

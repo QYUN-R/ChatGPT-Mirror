@@ -200,13 +200,35 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "login_ip": "20/min",
         "login_account": "10/min",
+        "captcha_issue_ip": "12/min",
         "email_verification_ip": "20/hour",
         "email_verification_address": "8/hour",
         "email_verification_attempt": "40/hour",
+        "redemption_user": "5/min",
+        "redemption_ip": "10/min",
         "expensive_user": "30/min",
         "user": "120/min",
     },
 }
+
+DJANGO_CACHE_URL = os.environ.get(
+    "DJANGO_CACHE_URL",
+    "redis://redis:6379/2" if DJANGO_ENV == "PRODUCTION" else "",
+).strip()
+if DJANGO_CACHE_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": DJANGO_CACHE_URL,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "chatgpt-mirror-local-cache",
+        }
+    }
 
 API_TOKEN_TTL_SECONDS = int(os.environ.get("API_TOKEN_TTL_SECONDS", str(7 * 24 * 60 * 60)))
 
@@ -304,6 +326,33 @@ USE_TZ = True
 BILLING_ENABLED = env_bool("BILLING_ENABLED", False)
 BILLING_ENFORCE_SUBSCRIPTION = env_bool("BILLING_ENFORCE_SUBSCRIPTION", False)
 BILLING_MOCK_PAYMENTS = env_bool("BILLING_MOCK_PAYMENTS", False)
+REDEMPTION_CODES_ENABLED = env_bool("REDEMPTION_CODES_ENABLED", False)
+REDEMPTION_CODE_KEYRING_PATH = os.environ.get(
+    "REDEMPTION_CODE_KEYRING_PATH",
+    "/run/secrets/redemption_code_keyring",
+).strip()
+# Tests may provide an in-memory keyring. Production must use the read-only file path.
+REDEMPTION_CODE_KEYRING = None
+REDEMPTION_FAILURE_LIMIT = int(os.environ.get("REDEMPTION_FAILURE_LIMIT", "10"))
+REDEMPTION_FAILURE_WINDOW_SECONDS = int(
+    os.environ.get("REDEMPTION_FAILURE_WINDOW_SECONDS", "1800")
+)
+REDEMPTION_LOCK_SECONDS = int(os.environ.get("REDEMPTION_LOCK_SECONDS", "1800"))
+REDEMPTION_TRUSTED_PROXY_CIDRS = env_list(
+    "REDEMPTION_TRUSTED_PROXY_CIDRS",
+    "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+)
+REDEMPTION_CLOUDFLARE_CIDRS = env_list(
+    "REDEMPTION_CLOUDFLARE_CIDRS",
+    (
+        "173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,"
+        "141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,"
+        "197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,"
+        "104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,"
+        "2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,"
+        "2a06:98c0::/29,2c0f:f248::/32"
+    ),
+)
 PAYMENT_PROVIDER = os.environ.get("PAYMENT_PROVIDER", "manual").strip().lower()
 BILLING_ORDER_HOLD_MINUTES = int(os.environ.get("BILLING_ORDER_HOLD_MINUTES", "30"))
 PAYMENT_CALLBACK_MAX_AGE_SECONDS = int(os.environ.get("PAYMENT_CALLBACK_MAX_AGE_SECONDS", "900"))

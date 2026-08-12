@@ -1,16 +1,19 @@
+import hashlib
 from uuid import uuid4
 
 from django.conf import settings
+from django.db.models import Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.views import APIView
 
 from app.billing.exceptions import BillingError
-from app.billing.models import Order, Plan, PlanOffer, SupportContact, UserNotification
+from app.billing.models import CommercialSettings, Order, Plan, PlanOffer, SupportContact, UserNotification
 from app.billing.payment import ALIPAY_CLOSED_STATUSES, PaymentEvent, get_checkout_provider, get_payment_provider
 from app.billing.selectors import current_subscription, usage_snapshot
 from app.billing.serializers import (
@@ -20,6 +23,7 @@ from app.billing.serializers import (
     SupportContactSerializer,
     SubscriptionSerializer,
 )
+from app.billing.redemption import redeem_code, redemption_available
 from app.billing.services import (
     active_subscription,
     audit,
@@ -29,12 +33,33 @@ from app.billing.services import (
     reconcile_provider_order,
     refresh_subscription_state,
 )
-from app.utils import get_client_ip
+from app.utils import get_client_ip, get_redemption_client_ip
 from app.page import DefaultPageNumberPagination
 
 
 def raise_api_error(error):
     raise ValidationError({"message": error.message, "code": error.code})
+
+
+class RedemptionUserRateThrottle(SimpleRateThrottle):
+    scope = "redemption_user"
+
+    def get_cache_key(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return None
+        digest = hashlib.sha256(str(request.user.pk).encode()).hexdigest()
+        return self.cache_format % {"scope": self.scope, "ident": digest}
+
+
+class RedemptionIpRateThrottle(SimpleRateThrottle):
+    scope = "redemption_ip"
+
+    def get_cache_key(self, request, view):
+        ip_address = get_redemption_client_ip(request)
+        if not ip_address:
+            return None
+        digest = hashlib.sha256(ip_address.encode()).hexdigest()
+        return self.cache_format % {"scope": self.scope, "ident": digest}
 
 
 class PlanListView(APIView):
@@ -44,6 +69,7 @@ class PlanListView(APIView):
         if not settings.BILLING_ENABLED:
             return Response({"enabled": False, "plans": []})
         checkout_provider = get_checkout_provider()
+        commercial = CommercialSettings.objects.filter(pk=1).first()
         queryset = Plan.objects.select_related("pool").prefetch_related("offers").filter(
             is_active=True,
             is_public=True,
@@ -53,8 +79,34 @@ class PlanListView(APIView):
             "enabled": True,
             "mock_payments": bool(settings.BILLING_MOCK_PAYMENTS),
             "checkout_available": bool(checkout_provider),
+            "redemption_enabled": redemption_available(),
+            "purchase_url": commercial.purchase_url if commercial else "",
             "plans": PlanSerializer(queryset, many=True).data,
         })
+
+
+class RedemptionCodeRedeemView(APIView):
+    permission_classes = (IsAuthenticated,)
+    throttle_classes = (RedemptionUserRateThrottle, RedemptionIpRateThrottle)
+
+    def post(self, request):
+        plaintext_code = str(request.data.get("code") or "")
+        if len(plaintext_code) > 128:
+            raise ValidationError({"message": "卡密无效或已使用", "code": "redemption_code_invalid"})
+        try:
+            order, subscription, already_redeemed = redeem_code(
+                user=request.user,
+                plaintext_code=plaintext_code,
+                ip_address=get_redemption_client_ip(request),
+                user_agent=request.headers.get("User-Agent", ""),
+            )
+            return Response({
+                "order": OrderSerializer(order).data,
+                "subscription": SubscriptionSerializer(subscription).data,
+                "already_redeemed": already_redeemed,
+            })
+        except BillingError as exc:
+            raise_api_error(exc)
 
 
 class BillingMeView(APIView):
@@ -80,6 +132,9 @@ class OrderListCreateView(APIView):
 
     def get(self, request):
         queryset = Order.objects.select_related("plan", "offer", "user").filter(user=request.user)
+        provider = str(request.query_params.get("provider") or "").strip().lower()
+        if provider:
+            queryset = queryset.filter(provider=provider)
         pg = DefaultPageNumberPagination()
         page = pg.paginate_queryset(queryset, request=request)
         return pg.get_paginated_response(OrderSerializer(page, many=True).data)
@@ -275,10 +330,19 @@ class NotificationListView(APIView):
     permission_classes = (IsAuthenticated,)
 
     def get(self, request):
-        queryset = UserNotification.objects.filter(user=request.user)
+        queryset = UserNotification.objects.select_related("announcement").filter(user=request.user)
         unread = request.query_params.get("unread")
         if unread in ("1", "true"):
             queryset = queryset.filter(read_at__isnull=True)
+        acknowledgement = request.query_params.get("requires_acknowledgement")
+        if acknowledgement in ("1", "true"):
+            queryset = queryset.filter(
+                announcement__requires_acknowledgement=True,
+                announcement__is_published=True,
+            ).filter(
+                Q(announcement__expires_at__isnull=True)
+                | Q(announcement__expires_at__gt=timezone.now())
+            )
         pg = DefaultPageNumberPagination()
         page = pg.paginate_queryset(queryset, request=request)
         response = pg.get_paginated_response(NotificationSerializer(page, many=True).data)

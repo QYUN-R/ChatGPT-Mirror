@@ -16,12 +16,15 @@
           <div class="notification-marker"></div>
           <div class="notification-content">
             <div class="notification-title">
-              <strong>{{ item.title }}</strong>
+              <div>
+                <strong>{{ item.title }}</strong>
+                <t-tag v-if="item.requires_acknowledgement" theme="warning" variant="light" size="small">需确认</t-tag>
+              </div>
               <span>{{ formatDateTime(item.created_at) }}</span>
             </div>
             <p>{{ item.content }}</p>
           </div>
-          <t-button v-if="!item.is_read" size="small" variant="text" @click="markRead(item)">标记已读</t-button>
+          <t-button v-if="!item.is_read" size="small" variant="text" @click="markRead(item)">确认已读</t-button>
         </article>
         <div v-if="!notifications.length" class="empty-row">暂无通知</div>
       </div>
@@ -69,6 +72,7 @@ onMounted(loadData)
 .notification-row.unread .notification-marker { background: var(--app-success); }
 .notification-title { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .notification-title strong { font-size: 14px; font-weight: 600; }
+.notification-title > div { display: flex; align-items: center; gap: 8px; }
 .notification-title span { color: var(--app-text-muted); font-size: 12px; white-space: nowrap; }
 .notification-content p { margin-top: 8px; color: #555550; font-size: 13px; line-height: 1.7; white-space: pre-wrap; }
 .empty-row { padding: 34px; color: var(--app-text-muted); font-size: 13px; text-align: center; }

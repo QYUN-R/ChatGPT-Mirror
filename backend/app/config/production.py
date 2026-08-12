@@ -19,10 +19,11 @@ CHATGPT_GATEWAY_URL = required_env("CHATGPT_GATEWAY_URL")
 ALLOW_REGISTER = os.environ.get("ALLOW_REGISTER", "true") == "true"
 SHOW_GITHUB = os.environ.get("SHOW_GITHUB", "true") == "true"
 
-TURNSTILE_MODE = os.environ.get("CLOUDFLARE_TURNSTILE", "disable").strip().lower()
-if TURNSTILE_MODE not in {"enable", "disable"}:
-    raise RuntimeError("CLOUDFLARE_TURNSTILE must be enable or disable")
+TURNSTILE_MODE = os.environ.get("CLOUDFLARE_TURNSTILE", "local").strip().lower()
+if TURNSTILE_MODE not in {"enable", "local", "disable"}:
+    raise RuntimeError("CLOUDFLARE_TURNSTILE must be enable, local, or disable")
 TURNSTILE_ENABLED = TURNSTILE_MODE == "enable"
+LOCAL_CAPTCHA_ENABLED = TURNSTILE_MODE == "local"
 TURNSTILE_SITE_KEY = os.environ.get("CLOUDFLARE_TURNSTILE_SITE_KEY", "").strip()
 TURNSTILE_SECRET_KEY = os.environ.get("CLOUDFLARE_TURNSTILE_SECRET_KEY", "").strip()
 if TURNSTILE_ENABLED and (not TURNSTILE_SITE_KEY or not TURNSTILE_SECRET_KEY):

@@ -17,6 +17,7 @@ from rest_framework.views import APIView
 
 from app.accounts.models import EmailDeliveryStatus, EmailVerificationChallenge, User
 from app.accounts.authentication import clear_auth_cookie, set_auth_cookie
+from app.accounts.captcha import issue_local_captcha, verify_local_captcha
 from app.accounts.email_auth import (
     EmailVerificationPurpose,
     consume_verification_challenge,
@@ -37,7 +38,12 @@ from app.accounts.serializers import (
 )
 from app.chatgpt.models import ChatgptAccount
 from app.settings import ADMIN_USERNAME, FREE_ACCOUNT_USERNAME
-from app.settings import ALLOW_REGISTER, TURNSTILE_ENABLED, TURNSTILE_SECRET_KEY
+from app.settings import (
+    ALLOW_REGISTER,
+    LOCAL_CAPTCHA_ENABLED,
+    TURNSTILE_ENABLED,
+    TURNSTILE_SECRET_KEY,
+)
 from app.utils import get_client_ip, get_request_subject, issue_free_session, save_visit_log, req_gateway
 
 
@@ -45,6 +51,12 @@ TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverif
 
 
 def verify_turnstile(request, expected_action):
+    if LOCAL_CAPTCHA_ENABLED:
+        token = request.data.get("captcha_token")
+        answer = request.data.get("captcha_answer")
+        verify_local_captcha(token, answer, expected_action)
+        return
+
     if not TURNSTILE_ENABLED:
         return
 
@@ -74,7 +86,7 @@ class LoginIpRateThrottle(SimpleRateThrottle):
     scope = "login_ip"
 
     def get_cache_key(self, request, view):
-        digest = hashlib.sha256(self.get_ident(request).encode()).hexdigest()
+        digest = hashlib.sha256(get_client_ip(request).encode()).hexdigest()
         return self.cache_format % {"scope": self.scope, "ident": digest}
 
 
@@ -98,7 +110,7 @@ class EmailVerificationIpRateThrottle(SimpleRateThrottle):
     scope = "email_verification_ip"
 
     def get_cache_key(self, request, view):
-        digest = hashlib.sha256(self.get_ident(request).encode()).hexdigest()
+        digest = hashlib.sha256(get_client_ip(request).encode()).hexdigest()
         return self.cache_format % {"scope": self.scope, "ident": digest}
 
 
@@ -117,8 +129,30 @@ class EmailVerificationAttemptRateThrottle(SimpleRateThrottle):
     scope = "email_verification_attempt"
 
     def get_cache_key(self, request, view):
-        digest = hashlib.sha256(self.get_ident(request).encode()).hexdigest()
+        digest = hashlib.sha256(get_client_ip(request).encode()).hexdigest()
         return self.cache_format % {"scope": self.scope, "ident": digest}
+
+
+class LocalCaptchaIssueRateThrottle(SimpleRateThrottle):
+    scope = "captcha_issue_ip"
+
+    def get_cache_key(self, request, view):
+        digest = hashlib.sha256(get_client_ip(request).encode()).hexdigest()
+        return self.cache_format % {"scope": self.scope, "ident": digest}
+
+
+class LocalCaptchaView(APIView):
+    authentication_classes = ()
+    permission_classes = ()
+    throttle_classes = (LocalCaptchaIssueRateThrottle,)
+
+    def get(self, request):
+        if not LOCAL_CAPTCHA_ENABLED:
+            raise ValidationError({"message": "本地验证码未启用"})
+        action = str(request.query_params.get("action") or "").strip()
+        if action not in {"login", "register", "password_reset", "bind_email"}:
+            raise ValidationError({"message": "验证码用途无效"})
+        return Response(issue_local_captcha(action))
 
 
 def issue_user_token(user, *, rotate=False):

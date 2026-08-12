@@ -7,6 +7,7 @@ from app.settings import (
     ALLOW_REGISTER,
     BILLING_ENABLED,
     EMAIL_VERIFICATION_ENABLED,
+    LOCAL_CAPTCHA_ENABLED,
     SHOW_GITHUB,
     TURNSTILE_ENABLED,
     TURNSTILE_SITE_KEY,
@@ -26,6 +27,7 @@ class VersionConfig(APIView):
             'email_verification_enabled': EMAIL_VERIFICATION_ENABLED,
             'turnstile_enabled': TURNSTILE_ENABLED,
             'turnstile_site_key': TURNSTILE_SITE_KEY if TURNSTILE_ENABLED else '',
+            'local_captcha_enabled': LOCAL_CAPTCHA_ENABLED,
         })
 
 

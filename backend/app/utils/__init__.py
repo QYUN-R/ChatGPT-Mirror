@@ -5,6 +5,7 @@ import time
 import uuid
 
 import requests
+from django.conf import settings
 from django.core import signing
 from django.core.signing import BadSignature, SignatureExpired
 from requests.exceptions import RequestException
@@ -42,6 +43,48 @@ def get_client_ip(request):
             except ValueError:
                 continue
     return ""
+
+
+def _parse_ip(value):
+    if not value:
+        return None
+    value = str(value).split(",", 1)[0].strip().strip("[]")
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
+
+
+def _in_networks(address, cidrs):
+    if address is None:
+        return False
+    for cidr in cidrs:
+        try:
+            if address in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def get_redemption_client_ip(request):
+    """Return a client IP only from headers written by a trusted reverse proxy."""
+
+    remote = _parse_ip(request.META.get("REMOTE_ADDR"))
+    if not _in_networks(remote, settings.REDEMPTION_TRUSTED_PROXY_CIDRS):
+        return str(remote) if remote else ""
+
+    gateway_client = _parse_ip(request.META.get("HTTP_X_CHATGPT_MIRROR_CLIENT_IP"))
+    if gateway_client:
+        return str(gateway_client)
+
+    proxy_peer = _parse_ip(request.META.get("HTTP_X_REAL_IP"))
+    cloudflare_client = _parse_ip(request.META.get("HTTP_CF_CONNECTING_IP"))
+    if _in_networks(proxy_peer, settings.REDEMPTION_CLOUDFLARE_CIDRS) and cloudflare_client:
+        return str(cloudflare_client)
+    if proxy_peer:
+        return str(proxy_peer)
+    return str(remote) if remote else ""
 
 
 def issue_free_session():

@@ -4,79 +4,107 @@
       <section class="subscription-panel">
         <div class="section-heading">
           <div>
-            <h2>当前订阅</h2>
-            <p>套餐权益、有效期和使用情况</p>
+            <h2>当前套餐</h2>
+            <p>查看套餐状态与有效时间</p>
           </div>
           <t-space>
-            <t-button variant="outline" @click="goSupport">
-              <template #icon><t-icon name="service" /></template>
-              售后支持
-            </t-button>
             <t-button variant="outline" @click="loadData">
               <template #icon><t-icon name="refresh" /></template>
               刷新
             </t-button>
+            <t-button theme="primary" :disabled="!me?.service_available" @click="enterService">
+              <template #icon><t-icon name="play-circle" /></template>
+              进入使用页面
+            </t-button>
           </t-space>
         </div>
-        <div v-if="me?.subscription" class="subscription-grid">
-          <div class="subscription-item">
-            <span>套餐</span>
+
+        <div v-if="me?.subscription" class="subscription-summary">
+          <div class="subscription-identity">
+            <span>当前套餐</span>
             <strong>{{ me.subscription.plan.name }}</strong>
+            <small>{{ me.subscription.offer?.name || `${me.subscription.offer?.months || 1} 个月` }}</small>
           </div>
-          <div class="subscription-item">
-            <span>状态</span>
+          <div class="subscription-metric">
+            <span>套餐状态</span>
             <t-tag :theme="statusTheme(me.subscription.status) as any" variant="light">
               {{ statusLabel(me.subscription.status) }}
             </t-tag>
           </div>
-          <div class="subscription-item">
-            <span>到期时间</span>
+          <div class="subscription-metric expiry-metric">
+            <span>套餐失效时间</span>
             <strong>{{ formatDateTime(me.subscription.ends_at) }}</strong>
+            <small>剩余 {{ remainingDays(me.subscription.ends_at) }} 天</small>
           </div>
-          <div class="subscription-item">
-            <span>剩余天数</span>
-            <strong>{{ remainingDays(me.subscription.ends_at) }} 天</strong>
-          </div>
-          <div class="subscription-item">
+          <div class="subscription-metric">
             <span>本月使用</span>
             <strong>{{ me.usage?.month ?? 0 }} 次</strong>
-          </div>
-          <div class="subscription-item">
-            <span>账号状态</span>
-            <strong>{{ me.subscription.assignment ? '已固定分配' : '首次使用时分配' }}</strong>
           </div>
         </div>
         <div v-else class="empty-subscription">
           <div>
             <strong>尚未开通套餐</strong>
-            <span>选择下方套餐后即可提交开通申请。</span>
+            <span>购买卡密并完成兑换后即可进入使用页面。</span>
           </div>
+          <t-button v-if="purchaseUrl" theme="primary" @click="openPurchaseLink">
+            <template #icon><t-icon name="cart" /></template>
+            购买卡密
+          </t-button>
         </div>
         <t-alert
           v-if="me?.subscription?.scheduled_plan_name"
           theme="info"
-          :message="`已安排在当前周期结束后切换为 ${me.subscription.scheduled_plan_name}`"
+          :message="`当前套餐结束后将切换为 ${me.subscription.scheduled_plan_name}`"
         />
-        <t-alert
-          v-if="pendingAlipayOrder"
-          theme="info"
-          :message="`支付宝订单 ${pendingAlipayOrder.order_no} 正在等待官方确认，权益只会在服务器确认到账后开通。`"
-        />
+      </section>
+
+      <section class="redemption-section">
+        <div class="section-heading redemption-heading">
+          <div>
+            <h2>卡密兑换</h2>
+            <p>卡密仅可使用一次，兑换成功后套餐立即生效或续期</p>
+          </div>
+          <t-button v-if="purchaseUrl" variant="outline" @click="openPurchaseLink">
+            <template #icon><t-icon name="cart" /></template>
+            购买卡密
+          </t-button>
+        </div>
+        <div class="redemption-form">
+          <t-input
+            v-model="redemptionCode"
+            :disabled="!redemptionEnabled"
+            clearable
+            maxlength="128"
+            placeholder="输入卡密，例如 TWG-XXXX-XXXX-XXXX"
+            @enter="submitRedemption"
+          />
+          <t-button
+            theme="primary"
+            :loading="redeeming"
+            :disabled="!redemptionEnabled || !redemptionCode.trim()"
+            @click="submitRedemption"
+          >
+            立即兑换
+          </t-button>
+        </div>
+        <span v-if="!redemptionEnabled" class="redemption-hint">卡密兑换暂未开放，请联系管理员。</span>
       </section>
 
       <section class="plans-section">
         <div class="section-heading">
           <div>
-            <h2>选择套餐</h2>
-            <p>套餐价格和可购买状态由管理员配置</p>
+            <h2>可兑换套餐</h2>
+            <p>价格由管理员维护，购买后返回本页输入对应卡密</p>
           </div>
-          <t-tag v-if="checkoutAvailable" theme="success" variant="light">支付宝安全支付</t-tag>
         </div>
         <div class="plan-grid">
           <article v-for="plan in plans" :key="plan.id" class="plan-panel" :class="{ current: isCurrent(plan) }">
             <div class="plan-topline">
               <div>
-                <h3>{{ plan.name }}</h3>
+                <div class="plan-title-row">
+                  <h3>{{ plan.name }}</h3>
+                  <t-tag v-if="isCurrent(plan)" theme="success" variant="light">当前套餐</t-tag>
+                </div>
                 <p>{{ plan.tagline }}</p>
               </div>
               <div class="plan-price" v-if="selectedOffer(plan)">
@@ -96,64 +124,46 @@
               </t-radio-button>
             </t-radio-group>
             <div class="plan-actions">
-              <t-tag v-if="!checkoutAvailable" theme="warning" variant="light">支付筹备中</t-tag>
-              <t-tag v-else-if="isCurrent(plan)" theme="success" variant="light">当前使用中</t-tag>
-              <t-tag v-else-if="!plan.purchase_available" theme="default" variant="light">暂不可开通</t-tag>
-              <span v-else></span>
-              <t-button
-                :theme="plan.pool_tier === 'PREMIUM' ? 'primary' : 'default'"
-                :variant="plan.pool_tier === 'PREMIUM' ? 'base' : 'outline'"
-                :loading="submittingPlanId === plan.id"
-                :disabled="!checkoutAvailable || !selectedOffer(plan) || (!isCurrent(plan) && !plan.purchase_available)"
-                @click="submitPlan(plan)"
-              >
-                {{ actionLabel(plan) }}
+              <span>{{ selectedOffer(plan)?.months || 1 }} 个月有效期</span>
+              <t-button :theme="plan.pool_tier === 'PREMIUM' ? 'primary' : 'default'" variant="outline" :disabled="!purchaseUrl" @click="openPurchaseLink">
+                购买对应卡密
               </t-button>
             </div>
           </article>
         </div>
       </section>
 
-      <section class="orders-section">
+      <section class="history-section">
         <div class="section-heading">
           <div>
-            <h2>最近订单</h2>
-            <p>订单金额和套餐快照会永久保留</p>
+            <h2>卡密充值记录</h2>
+            <p>记录充值套餐、充值时间和该次充值后的失效时间</p>
           </div>
         </div>
-        <div class="orders-table">
-          <t-table :data="orders" :columns="orderColumns" row-key="id" :hover="true">
-            <template #price="{ row }">{{ formatMoney(row.price_cents, row.currency) }}</template>
-            <template #provider="{ row }">{{ providerLabel(row.provider) }}</template>
-            <template #status="{ row }">
-              <t-tag :theme="statusTheme(row.status) as any" variant="light">{{ statusLabel(row.status) }}</t-tag>
-            </template>
-            <template #created_at="{ row }">{{ formatDateTime(row.created_at) }}</template>
+        <div class="history-table">
+          <t-table :data="redemptionOrders" :columns="historyColumns" row-key="id" :hover="true">
+            <template #term="{ row }">{{ row.offer_name }} · {{ row.entitlement_months }} 个月</template>
             <template #paid_at="{ row }">{{ formatDateTime(row.paid_at) }}</template>
-            <template #op="{ row }">
-              <t-link v-if="row.provider === 'alipay' && row.status === 'PENDING'" theme="primary" @click="syncOrder(row)">
-                同步支付状态
-              </t-link>
+            <template #entitlement_ends_at="{ row }">{{ formatDateTime(row.entitlement_ends_at) }}</template>
+            <template #status>
+              <t-tag theme="success" variant="light">充值成功</t-tag>
             </template>
           </t-table>
         </div>
-        <div v-if="orders.length" class="order-card-list">
-          <article v-for="order in orders" :key="order.id" class="order-card">
-            <div>
+        <div v-if="redemptionOrders.length" class="history-card-list">
+          <article v-for="order in redemptionOrders" :key="order.id" class="history-card">
+            <div class="history-card-title">
               <strong>{{ order.plan_name }}</strong>
-              <span>{{ order.order_no }}</span>
+              <t-tag theme="success" variant="light">充值成功</t-tag>
             </div>
-            <div class="order-card-meta">
-              <span>{{ formatMoney(order.price_cents, order.currency) }}</span>
-              <t-tag :theme="statusTheme(order.status) as any" variant="light">{{ statusLabel(order.status) }}</t-tag>
-            </div>
-            <t-link v-if="order.provider === 'alipay' && order.status === 'PENDING'" theme="primary" @click="syncOrder(order)">
-              同步支付状态
-            </t-link>
-            <small>{{ formatDateTime(order.paid_at || order.created_at) }}</small>
+            <dl>
+              <div><dt>充值套餐</dt><dd>{{ order.offer_name }} · {{ order.entitlement_months }} 个月</dd></div>
+              <div><dt>充值时间</dt><dd>{{ formatDateTime(order.paid_at) }}</dd></div>
+              <div><dt>充值后失效</dt><dd>{{ formatDateTime(order.entitlement_ends_at) }}</dd></div>
+            </dl>
           </article>
         </div>
-        <div v-if="!orders.length" class="table-empty">暂无订单</div>
+        <div v-if="!redemptionOrders.length" class="table-empty">暂无卡密充值记录</div>
       </section>
     </t-loading>
   </div>
@@ -170,22 +180,19 @@ const loading = ref(false)
 const router = useRouter()
 const me = ref<any>(null)
 const plans = ref<any[]>([])
-const orders = ref<any[]>([])
+const redemptionOrders = ref<any[]>([])
 const selectedOfferIds = ref<Record<number, number>>({})
-const submittingPlanId = ref<number | null>(null)
-const checkoutAvailable = ref(false)
-const pendingAlipayOrder = ref<any>(null)
+const redemptionEnabled = ref(false)
+const purchaseUrl = ref('')
+const redemptionCode = ref('')
+const redeeming = ref(false)
 
-const orderColumns = [
-  { colKey: 'order_no', title: '订单号', width: 190 },
-  { colKey: 'plan_name', title: '套餐', width: 130 },
-  { colKey: 'order_type', title: '类型', width: 100 },
-  { colKey: 'provider', title: '渠道', cell: 'provider', width: 100 },
-  { colKey: 'price', title: '金额', cell: 'price', width: 110 },
-  { colKey: 'status', title: '状态', cell: 'status', width: 100 },
-  { colKey: 'created_at', title: '下单时间', cell: 'created_at', width: 170 },
-  { colKey: 'paid_at', title: '支付时间', cell: 'paid_at', width: 170 },
-  { colKey: 'op', title: '操作', cell: 'op', width: 130, fixed: 'right' }
+const historyColumns = [
+  { colKey: 'plan_name', title: '充值套餐', minWidth: 140 },
+  { colKey: 'term', title: '套餐周期', cell: 'term', minWidth: 150 },
+  { colKey: 'paid_at', title: '充值时间', cell: 'paid_at', minWidth: 170 },
+  { colKey: 'entitlement_ends_at', title: '充值后失效时间', cell: 'entitlement_ends_at', minWidth: 180 },
+  { colKey: 'status', title: '状态', cell: 'status', width: 110 }
 ]
 
 const isCurrent = (plan: any) => me.value?.subscription?.plan?.id === plan.id
@@ -194,154 +201,121 @@ const selectedOffer = (plan: any) => {
   const selectedId = Number(selectedOfferIds.value[plan.id])
   return offers.find((offer: any) => offer.id === selectedId) || offers[0] || null
 }
-const providerLabel = (provider: string) => provider === 'alipay' ? '支付宝' : provider === 'manual' ? '人工' : provider === 'mock' ? '模拟' : provider
-
-const actionLabel = (plan: any) => {
-  if (!checkoutAvailable.value) return '暂未开放购买'
-  if (!isCurrent(plan) && !plan.purchase_available) return '暂不可开通'
-  const current = me.value?.subscription?.plan
-  if (!current) return '立即开通'
-  if (current.id === plan.id) return '续费'
-  if (current.pool_tier === 'STANDARD' && plan.pool_tier === 'PREMIUM') return '升级套餐'
-  if (current.pool_tier === 'PREMIUM' && plan.pool_tier === 'STANDARD') return '下期降级'
-  return '切换套餐'
-}
 
 const loadData = async () => {
   loading.value = true
   const [planData, meData, orderData] = await Promise.all([
     request('/0x/billing/plans'),
     request('/0x/billing/me'),
-    request('/0x/billing/orders?page_size=8')
+    request('/0x/billing/orders?provider=redemption_code&page_size=50')
   ])
   plans.value = planData?.plans || []
   const nextOfferIds = { ...selectedOfferIds.value }
   for (const plan of plans.value) {
-    const hasSelectedOffer = plan.offers?.some((offer: any) => offer.id === Number(nextOfferIds[plan.id]))
-    if (!hasSelectedOffer && plan.offers?.[0]) nextOfferIds[plan.id] = plan.offers[0].id
+    if (!plan.offers?.some((offer: any) => offer.id === Number(nextOfferIds[plan.id])) && plan.offers?.[0]) {
+      nextOfferIds[plan.id] = plan.offers[0].id
+    }
   }
   selectedOfferIds.value = nextOfferIds
-  checkoutAvailable.value = Boolean(planData?.checkout_available)
+  redemptionEnabled.value = Boolean(planData?.redemption_enabled)
+  purchaseUrl.value = String(planData?.purchase_url || '')
   me.value = meData
-  orders.value = orderData?.results || []
-  pendingAlipayOrder.value = orders.value.find((order: any) => order.provider === 'alipay' && order.status === 'PENDING') || null
+  redemptionOrders.value = orderData?.results || []
   loading.value = false
 }
 
-const submitPlan = async (plan: any) => {
-  if (!checkoutAvailable.value || !plan.purchase_available) return
-  const offer = selectedOffer(plan)
-  if (!offer) return
-  submittingPlanId.value = plan.id
-  const data = await request('/0x/billing/orders', 'POST', {
-    offer_id: offer.id,
-    idempotency_key: crypto.randomUUID(),
-    pay_now: true
-  })
-  submittingPlanId.value = null
+const submitRedemption = async () => {
+  if (!redemptionEnabled.value || !redemptionCode.value.trim()) return
+  redeeming.value = true
+  const data = await request('/0x/billing/redemption-codes/redeem', 'POST', { code: redemptionCode.value.trim() })
+  redeeming.value = false
   if (!data?.order) return
-  if (data.order.status === 'PAID') {
-    MessagePlugin.success('套餐已生效')
-    await loadData()
-    return
-  }
-  if (data.checkout?.provider === 'alipay' && data.checkout?.pay_url) {
-    sessionStorage.setItem('billing_pending_alipay_order_id', String(data.order.id))
-    window.location.assign(data.checkout.pay_url)
-    return
-  }
-  MessagePlugin.info('订单已创建，等待支付确认')
+  redemptionCode.value = ''
+  MessagePlugin.success(data.already_redeemed ? '该卡密已兑换，已恢复充值结果' : '卡密兑换成功，套餐已生效')
   await loadData()
 }
 
-const syncOrder = async (order: any, announce = true) => {
-  const data = await request(`/0x/billing/orders/${order.id}/sync-payment`, 'POST')
-  if (!data?.order) return null
-  const index = orders.value.findIndex((item: any) => item.id === data.order.id)
-  if (index >= 0) orders.value[index] = data.order
-  pendingAlipayOrder.value = orders.value.find((item: any) => item.provider === 'alipay' && item.status === 'PENDING') || null
-  if (announce && data.order.status === 'PAID') MessagePlugin.success('支付宝到账已确认，套餐已开通')
-  if (announce && data.order.status === 'CLOSED') MessagePlugin.warning('该支付宝订单已关闭')
-  return data.order
+const openPurchaseLink = () => {
+  if (purchaseUrl.value) window.open(purchaseUrl.value, '_blank', 'noopener,noreferrer')
 }
 
-const reconcileReturnedPayment = async () => {
-  const orderId = Number(sessionStorage.getItem('billing_pending_alipay_order_id'))
-  if (!Number.isInteger(orderId) || orderId <= 0) return
-  let attempts = 0
-  const poll = async () => {
-    attempts += 1
-    const order = await syncOrder({ id: orderId }, attempts === 1)
-    if (!order || order.status === 'PAID' || order.status === 'CLOSED' || attempts >= 8) {
-      if (order?.status === 'PAID' || order?.status === 'CLOSED') {
-        sessionStorage.removeItem('billing_pending_alipay_order_id')
-        await loadData()
-      }
-      return
-    }
-    window.setTimeout(poll, 2500)
+const enterService = async () => {
+  if (!me.value?.service_available) {
+    MessagePlugin.warning('套餐尚未生效，请先兑换卡密')
+    return
   }
-  await poll()
+  await router.push({ name: 'LoginChatgpt' })
 }
 
-const goSupport = () => router.push({ name: 'SupportCenter' })
-
-onMounted(async () => {
-  await loadData()
-  await reconcileReturnedPayment()
-})
+onMounted(loadData)
 </script>
 
 <style scoped>
 .billing-page { display: grid; min-width: 0; gap: 20px; }
 .billing-page :deep(.t-loading__parent) { min-width: 0; }
 .subscription-panel,
+.redemption-section,
 .plans-section,
-.orders-section { min-width: 0; padding: 22px 24px; background: var(--app-surface); border: 1px solid var(--app-border); border-radius: 8px; }
+.history-section { min-width: 0; padding: 22px 24px; background: var(--app-surface); border: 1px solid var(--app-border); border-radius: 8px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
 .section-heading h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 0; }
 .section-heading p { margin-top: 5px; color: var(--app-text-muted); font-size: 13px; line-height: 1.5; }
-.subscription-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border: 1px solid #e7e7e3; border-radius: 7px; }
-.subscription-item { min-width: 0; padding: 18px; border-right: 1px solid #e7e7e3; }
-.subscription-item:last-child { border-right: 0; }
-.subscription-item span { display: block; color: var(--app-text-muted); font-size: 12px; }
-.subscription-item strong { display: block; margin-top: 9px; overflow: hidden; color: var(--app-text); font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.empty-subscription { padding: 24px; background: #f6f6f3; border: 1px dashed var(--app-border-strong); border-radius: 7px; }
+.subscription-summary { display: grid; grid-template-columns: 1.3fr 0.8fr 1.4fr 0.8fr; border: 1px solid #e3e3df; border-radius: 7px; overflow: hidden; }
+.subscription-identity,
+.subscription-metric { min-width: 0; padding: 20px; border-right: 1px solid #e3e3df; }
+.subscription-summary > div:last-child { border-right: 0; }
+.subscription-summary span { display: block; color: var(--app-text-muted); font-size: 12px; }
+.subscription-summary strong { display: block; margin-top: 8px; color: var(--app-text); font-size: 17px; font-weight: 600; }
+.subscription-summary small { display: block; margin-top: 5px; color: var(--app-text-muted); font-size: 12px; }
+.subscription-metric :deep(.t-tag) { margin-top: 10px; }
+.expiry-metric strong { font-variant-numeric: tabular-nums; }
+.empty-subscription { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 24px; background: #f6f6f3; border: 1px dashed var(--app-border-strong); border-radius: 7px; }
 .empty-subscription strong,
 .empty-subscription span { display: block; }
 .empty-subscription span { margin-top: 6px; color: var(--app-text-muted); font-size: 13px; }
 .subscription-panel :deep(.t-alert) { margin-top: 14px; }
+.redemption-heading { margin-bottom: 14px; }
+.redemption-form { display: grid; grid-template-columns: minmax(260px, 620px) 120px; gap: 10px; align-items: center; }
+.redemption-form :deep(.t-input__inner) { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.redemption-hint { display: block; margin-top: 8px; color: var(--app-text-muted); font-size: 12px; }
 .plan-grid { display: grid; min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.plan-panel { display: grid; min-width: 0; min-height: 234px; padding: 22px; border: 1px solid var(--app-border-strong); border-radius: 8px; }
+.plan-panel { display: grid; min-width: 0; min-height: 220px; padding: 22px; border: 1px solid var(--app-border-strong); border-radius: 8px; }
 .plan-panel.current { border-color: #91b7a0; box-shadow: inset 0 3px 0 #4f8061; }
 .plan-topline { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
-.plan-topline h3 { font-size: 20px; font-weight: 600; letter-spacing: 0; }
+.plan-title-row { display: flex; align-items: center; gap: 10px; }
+.plan-topline h3 { margin: 0; font-size: 20px; font-weight: 600; }
 .plan-topline p { margin-top: 8px; color: var(--app-text-muted); font-size: 14px; }
 .plan-price { display: flex; align-items: baseline; white-space: nowrap; }
 .plan-price strong { font-size: 29px; font-weight: 600; }
 .plan-price span { margin-left: 5px; color: var(--app-text-muted); font-size: 13px; }
 .offer-selector { margin-top: 18px; overflow-x: auto; white-space: nowrap; }
-.plan-actions { display: flex; align-items: center; justify-content: space-between; align-self: end; }
-.orders-table { min-width: 0; overflow-x: auto; }
-.order-card-list { display: none; }
-.table-empty { padding: 28px; color: var(--app-text-muted); font-size: 13px; text-align: center; border: 1px solid #e7e7e3; border-top: 0; }
-@media (max-width: 1180px) { .subscription-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } .subscription-item:nth-child(3) { border-right: 0; } .subscription-item:nth-child(-n+3) { border-bottom: 1px solid #e7e7e3; } }
+.plan-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; align-self: end; }
+.plan-actions > span { color: var(--app-text-muted); font-size: 13px; }
+.history-table { min-width: 0; overflow-x: auto; }
+.history-card-list { display: none; }
+.table-empty { padding: 30px; color: var(--app-text-muted); font-size: 13px; text-align: center; border: 1px solid #e7e7e3; border-top: 0; }
+@media (max-width: 1000px) { .subscription-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); } .subscription-summary > div { border-bottom: 1px solid #e3e3df; } .subscription-summary > div:nth-child(2n) { border-right: 0; } .subscription-summary > div:nth-last-child(-n+2) { border-bottom: 0; } }
 @media (max-width: 820px) { .plan-grid { grid-template-columns: 1fr; } .section-heading { align-items: flex-start; flex-direction: column; } }
 @media (max-width: 620px) {
-  .subscription-panel, .plans-section, .orders-section { padding: 18px 14px; }
-  .subscription-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .subscription-item { border-bottom: 1px solid #e7e7e3; }
-  .subscription-item:nth-child(2n) { border-right: 0; }
-  .subscription-item:nth-last-child(-n+2) { border-bottom: 0; }
+  .subscription-panel, .redemption-section, .plans-section, .history-section { padding: 18px 14px; }
+  .section-heading :deep(.t-space) { width: 100%; }
+  .section-heading :deep(.t-space .t-button) { flex: 1; }
+  .redemption-form { grid-template-columns: 1fr; }
+  .subscription-summary { grid-template-columns: 1fr; }
+  .subscription-summary > div { border-right: 0; border-bottom: 1px solid #e3e3df; }
+  .subscription-summary > div:nth-last-child(-n+2) { border-bottom: 1px solid #e3e3df; }
+  .subscription-summary > div:last-child { border-bottom: 0; }
+  .empty-subscription { align-items: stretch; flex-direction: column; }
   .plan-topline { flex-direction: column; }
-  .orders-table { display: none; }
-  .order-card-list { display: grid; gap: 10px; }
-  .order-card { display: grid; gap: 9px; padding: 14px; background: #f6f6f3; border: 1px solid #e7e7e3; border-radius: 7px; }
-  .order-card > div:first-child { display: grid; gap: 4px; min-width: 0; }
-  .order-card strong { font-size: 15px; font-weight: 600; }
-  .order-card > div:first-child span { overflow: hidden; color: var(--app-text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-  .order-card-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .order-card-meta > span { font-size: 15px; font-weight: 600; }
-  .order-card small { color: var(--app-text-muted); font-size: 12px; }
+  .plan-actions { align-items: stretch; flex-direction: column; }
+  .history-table { display: none; }
+  .history-card-list { display: grid; gap: 10px; }
+  .history-card { padding: 15px; background: #f6f6f3; border: 1px solid #e7e7e3; border-radius: 7px; }
+  .history-card-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .history-card-title strong { font-size: 15px; }
+  .history-card dl { display: grid; gap: 8px; margin-top: 13px; }
+  .history-card dl > div { display: flex; justify-content: space-between; gap: 16px; }
+  .history-card dt { color: var(--app-text-muted); font-size: 12px; }
+  .history-card dd { margin: 0; font-size: 12px; text-align: right; }
 }
 </style>

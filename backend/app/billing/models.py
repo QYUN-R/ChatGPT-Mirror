@@ -1,5 +1,6 @@
 import base64
 import binascii
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -63,6 +64,12 @@ class AnnouncementAudience(models.TextChoices):
     ALL = "ALL", "全部用户"
     ACTIVE_SUBSCRIBERS = "ACTIVE_SUBSCRIBERS", "有效订阅用户"
     PLAN = "PLAN", "指定套餐"
+
+
+class RedemptionCodeStatus(models.TextChoices):
+    AVAILABLE = "AVAILABLE", "未使用"
+    REDEEMED = "REDEEMED", "已使用"
+    REVOKED = "REVOKED", "已撤销"
 
 
 class TimestampedModel(models.Model):
@@ -215,10 +222,12 @@ class Order(TimestampedModel):
     idempotency_key = models.CharField(max_length=96, unique=True, null=True, blank=True)
     plan_snapshot = models.JSONField(default=dict)
     offer_snapshot = models.JSONField(default=dict)
+    entitlement_months = models.PositiveSmallIntegerField(default=1)
     price_cents = models.PositiveBigIntegerField()
     currency = models.CharField(max_length=8, default="CNY")
     payment_expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
     paid_at = models.DateTimeField(null=True, blank=True)
+    entitlement_ends_at = models.DateTimeField(null=True, blank=True, db_index=True)
     closed_at = models.DateTimeField(null=True, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
 
@@ -258,6 +267,164 @@ class PaymentTransaction(models.Model):
                 name="billing_provider_transaction_uniq",
             ),
         ]
+
+
+class CommercialSettings(TimestampedModel):
+    """Singleton commercial configuration safe to expose to signed-in users."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    redemption_enabled = models.BooleanField(default=False)
+    purchase_url = models.URLField(max_length=500, blank=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="commercial_settings_updates",
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        verbose_name_plural = "commercial settings"
+
+    def clean(self):
+        self.purchase_url = self.purchase_url.strip()
+        if not self.purchase_url:
+            return
+        parsed = urlsplit(self.purchase_url)
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValidationError({"purchase_url": "购买链接必须是有效的 HTTPS 地址"})
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class RedemptionCodeBatch(TimestampedModel):
+    batch_no = models.CharField(max_length=32, unique=True, db_index=True)
+    plan = models.ForeignKey(
+        Plan,
+        on_delete=models.PROTECT,
+        related_name="redemption_batches",
+    )
+    offer = models.ForeignKey(
+        PlanOffer,
+        on_delete=models.PROTECT,
+        related_name="redemption_batches",
+    )
+    plan_snapshot = models.JSONField(default=dict)
+    offer_snapshot = models.JSONField(default=dict)
+    entitlement_months = models.PositiveSmallIntegerField()
+    price_cents = models.PositiveBigIntegerField()
+    currency = models.CharField(max_length=8, default="CNY")
+    quantity = models.PositiveSmallIntegerField()
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    is_archived = models.BooleanField(default=False, db_index=True)
+    note = models.CharField(max_length=240, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="created_redemption_batches",
+    )
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(quantity__gte=1, quantity__lte=1000),
+                name="bill_red_batch_qty_range",
+            ),
+            models.CheckConstraint(
+                condition=Q(entitlement_months__gte=1),
+                name="bill_red_batch_months_pos",
+            ),
+        ]
+
+    def __str__(self):
+        return self.batch_no
+
+
+class RedemptionCode(TimestampedModel):
+    batch = models.ForeignKey(
+        RedemptionCodeBatch,
+        on_delete=models.PROTECT,
+        related_name="codes",
+    )
+    serial_no = models.CharField(max_length=32, unique=True, db_index=True)
+    key_version = models.CharField(max_length=32)
+    code_digest = models.CharField(max_length=64)
+    code_mask = models.CharField(max_length=64)
+    status = models.CharField(
+        max_length=16,
+        choices=RedemptionCodeStatus.choices,
+        default=RedemptionCodeStatus.AVAILABLE,
+        db_index=True,
+    )
+    is_archived = models.BooleanField(default=False, db_index=True)
+    redeemed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="redeemed_codes",
+        null=True,
+        blank=True,
+    )
+    redeemed_email = models.EmailField(max_length=254, blank=True)
+    redeemed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    redeemed_ip = models.GenericIPAddressField(null=True, blank=True, db_index=True)
+    redeemed_user_agent = models.CharField(max_length=512, blank=True)
+    order = models.OneToOneField(
+        Order,
+        on_delete=models.PROTECT,
+        related_name="redemption_code",
+        null=True,
+        blank=True,
+    )
+    subscription = models.ForeignKey(
+        Subscription,
+        on_delete=models.PROTECT,
+        related_name="redemption_codes",
+        null=True,
+        blank=True,
+    )
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="revoked_redemption_codes",
+        null=True,
+        blank=True,
+    )
+    archived_at = models.DateTimeField(null=True, blank=True)
+    archived_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="archived_redemption_codes",
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("key_version", "code_digest"),
+                name="bill_red_code_digest_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("batch", "status"), name="bill_red_code_batch_ix"),
+            models.Index(fields=("status", "is_archived"), name="bill_red_code_state_ix"),
+            models.Index(fields=("redeemed_by", "redeemed_at"), name="bill_red_user_time_ix"),
+        ]
+
+    def __str__(self):
+        return self.serial_no
 
 
 class PoolAccountPolicy(TimestampedModel):
@@ -521,6 +688,7 @@ class Announcement(TimestampedModel):
         blank=True,
     )
     is_published = models.BooleanField(default=False)
+    requires_acknowledgement = models.BooleanField(default=False)
     published_at = models.DateTimeField(null=True, blank=True, db_index=True)
     expires_at = models.DateTimeField(null=True, blank=True)
 

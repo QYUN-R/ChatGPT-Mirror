@@ -16,6 +16,11 @@
         <template #status="{ row }">
           <t-tag :theme="row.is_published ? 'success' : 'default'" variant="light">{{ row.is_published ? '已发布' : '草稿' }}</t-tag>
         </template>
+        <template #acknowledgement="{ row }">
+          <t-tag :theme="row.requires_acknowledgement ? 'warning' : 'default'" variant="light">
+            {{ row.requires_acknowledgement ? '强制确认' : '普通通知' }}
+          </t-tag>
+        </template>
         <template #published_at="{ row }">{{ formatDateTime(row.published_at) }}</template>
         <template #op="{ row }">
           <t-space size="small">
@@ -68,6 +73,7 @@
           </t-select>
         </t-form-item>
         <t-form-item label="公告内容"><t-textarea v-model="form.content" :autosize="{ minRows: 6, maxRows: 12 }" /></t-form-item>
+        <t-form-item label="强制确认"><t-switch v-model="form.requires_acknowledgement" /></t-form-item>
         <t-form-item label="失效时间"><t-date-picker v-model="form.expires_at" enable-time-picker clearable /></t-form-item>
       </t-form>
       <template #footer>
@@ -97,11 +103,12 @@ const columns = [
   { colKey: 'category', title: '类型', width: 110 },
   { colKey: 'severity', title: '级别', width: 90 },
   { colKey: 'audience', title: '发送范围', cell: 'audience', width: 140 },
+  { colKey: 'acknowledgement', title: '阅读方式', cell: 'acknowledgement', width: 110 },
   { colKey: 'status', title: '状态', cell: 'status', width: 90 },
   { colKey: 'published_at', title: '发布时间', cell: 'published_at', width: 170 },
   { colKey: 'op', title: '操作', cell: 'op', width: 150 }
 ]
-const form = reactive<any>({ id: 0, title: '', content: '', category: 'NOTICE', severity: 'INFO', audience: 'ALL', plan_id: null, expires_at: '' })
+const form = reactive<any>({ id: 0, title: '', content: '', category: 'NOTICE', severity: 'INFO', audience: 'ALL', plan_id: null, requires_acknowledgement: false, expires_at: '' })
 
 const audienceLabel = (value: string, planName?: string) => {
   if (value === 'ACTIVE_SUBSCRIBERS') return '有效订阅用户'
@@ -123,8 +130,8 @@ const loadData = async () => {
 const openDialog = (row?: any) => {
   Object.assign(form, row ? {
     id: row.id, title: row.title, content: row.content, category: row.category, severity: row.severity,
-    audience: row.audience, plan_id: row.plan || null, expires_at: row.expires_at || ''
-  } : { id: 0, title: '', content: '', category: 'NOTICE', severity: 'INFO', audience: 'ALL', plan_id: null, expires_at: '' })
+    audience: row.audience, plan_id: row.plan || null, requires_acknowledgement: Boolean(row.requires_acknowledgement), expires_at: row.expires_at || ''
+  } : { id: 0, title: '', content: '', category: 'NOTICE', severity: 'INFO', audience: 'ALL', plan_id: null, requires_acknowledgement: false, expires_at: '' })
   dialogVisible.value = true
 }
 

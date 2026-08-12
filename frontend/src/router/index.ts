@@ -15,6 +15,20 @@ function clearAccessibleCookies(): void {
   }
 }
 
+async function hasRequiredAnnouncement(): Promise<boolean> {
+  try {
+    const response = await fetch(
+      '/0x/billing/notifications?unread=1&requires_acknowledgement=1&page_size=1',
+      { credentials: 'include' }
+    )
+    if (!response.ok) return false
+    const data = await response.json()
+    return Array.isArray(data.results) && data.results.length > 0
+  } catch {
+    return false
+  }
+}
+
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
@@ -100,6 +114,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '订单', requiresAdmin: true }
       },
       {
+        path: 'redemption-codes',
+        name: 'RedemptionCodes',
+        component: () => import('@/pages/account/redemption-codes.vue'),
+        meta: { title: '卡密管理', requiresAdmin: true }
+      },
+      {
         path: 'announcements',
         name: 'Announcements',
         component: () => import('@/pages/account/announcements.vue'),
@@ -151,7 +171,7 @@ const routes: RouteRecordRaw[] = [
         path: 'billing',
         name: 'Billing',
         component: () => import('@/pages/account/billing.vue'),
-        meta: { title: '套餐中心', memberOnly: true }
+        meta: { title: '卡密充值', memberOnly: true }
       },
       {
         path: 'notifications',
@@ -199,6 +219,11 @@ router.beforeEach(async (to, _from, next) => {
     clearAccessibleCookies()
     window.location.replace('/admin#/')
     next(false)
+    return
+  }
+
+  if (to.path === '/login-chatgpt' && authenticated && !userStore.isAdmin && await hasRequiredAnnouncement()) {
+    next({ name: 'Billing', query: { notice: 'required' } })
     return
   }
   

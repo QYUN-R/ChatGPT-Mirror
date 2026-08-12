@@ -134,14 +134,14 @@ interface TableData {
   default_login_mode: 'api' | 'web'
 }
 const tableData = ref<TableData[]>([])
-const selectedMode = ref<'api' | 'web'>('api')
-const preferredMode = ref<'api' | 'web'>('api')
+const selectedMode = ref<'api' | 'web'>('web')
+const preferredMode = ref<'api' | 'web'>('web')
 
 onMounted(async () => {
   if (route.query.logout === '1') {
     userStore.logout()
   }
-  preferredMode.value = route.query.mode === 'web' ? 'web' : 'api'
+  preferredMode.value = route.query.mode === 'api' ? 'api' : 'web'
   selectedMode.value = preferredMode.value
   await getUserChatGPTAccountList()
 })

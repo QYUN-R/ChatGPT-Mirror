@@ -15,6 +15,7 @@ from app.accounts.views.login import (
     EmailChangeRequestView,
     EmailVerificationStatusView,
     EmailVerificationRequestView,
+    LocalCaptchaView,
     PasswordResetConfirmView,
     PasswordResetRequestView,
     UserFreeLoginView,
@@ -25,6 +26,7 @@ from app.accounts.views.backup import UnifiedBackupView
 urlpatterns = [
     path("", UserAccountView.as_view()),
     path("version-cfg", VersionConfig.as_view()),
+    path("captcha", LocalCaptchaView.as_view()),
     path("get-mirror-token", GetMirrorToken.as_view()),
     path("register", csrf_exempt(AccountRegister.as_view())),
     path("login-free", csrf_exempt(UserFreeLoginView.as_view())),

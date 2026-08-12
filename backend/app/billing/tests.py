@@ -16,6 +16,7 @@ from app.billing.exceptions import BillingError, CapacityUnavailable, PaymentRej
 from app.billing.models import (
     AccountAssignment,
     AccountAssignmentEvent,
+    Announcement,
     Order,
     OrderStatus,
     PaymentTransaction,
@@ -387,6 +388,7 @@ class BillingServiceTests(TestCase):
         self.assertTrue(response.data["managed_assignment"])
         self.assertEqual(response.data["results"][0]["id"], 0)
         self.assertEqual(response.data["results"][0]["chatgpt_flag"], "套餐专属账号")
+        self.assertEqual(response.data["results"][0]["default_login_mode"], "web")
 
     @override_settings(BILLING_ENABLED=False)
     def test_disabled_billing_keeps_legacy_account_selection(self):
@@ -445,6 +447,27 @@ class BillingServiceTests(TestCase):
         self.assertEqual(login_payload["daily_quota"], 12)
         self.assertEqual(login_payload["monthly_quota"], 120)
         self.assertNotIn("chatgpt_id", login_payload)
+
+    def test_managed_login_defaults_to_mixed_mode(self):
+        for account in self.standard_accounts:
+            account.session_token = "test-session-token"
+            account.session_token_valid = True
+            account.save(update_fields=["session_token", "session_token_valid", "updated_time"])
+
+        self.purchase()
+        request = APIRequestFactory().post(
+            "/0x/chatgpt/login",
+            {},
+            format="json",
+            HTTP_USER_AGENT="billing-default-mixed-mode-test",
+        )
+        force_authenticate(request, user=self.user)
+        with patch("app.chatgpt.views.chatgpt.req_gateway", side_effect=[{}, {"message": "ok"}]) as gateway:
+            response = ChatGPTLoginView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        login_payload = gateway.call_args_list[1].kwargs["json"]
+        self.assertEqual(login_payload["login_mode"], "web")
 
 
 @override_settings(
@@ -632,6 +655,43 @@ class BillingApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(self.user.notifications.filter(title="服务器迁移").exists())
+
+    def test_required_announcement_is_listed_until_user_acknowledges_it(self):
+        self.client.force_authenticate(self.admin)
+        response = self.client.post(
+            "/0x/admin/announcements",
+            {
+                "action": "publish",
+                "title": "必须阅读",
+                "content": "请确认本次维护通知。",
+                "audience": "ALL",
+                "requires_acknowledgement": True,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        announcement = Announcement.objects.get(title="必须阅读")
+        self.assertTrue(announcement.requires_acknowledgement)
+
+        self.client.force_authenticate(self.user)
+        listed = self.client.get(
+            "/0x/billing/notifications?unread=1&requires_acknowledgement=1&page_size=10"
+        )
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(len(listed.data["results"]), 1)
+        notification = listed.data["results"][0]
+        self.assertTrue(notification["requires_acknowledgement"])
+
+        marked = self.client.post(
+            f"/0x/billing/notifications/{notification['id']}/read",
+            {},
+            format="json",
+        )
+        self.assertEqual(marked.status_code, 200)
+        listed_again = self.client.get(
+            "/0x/billing/notifications?unread=1&requires_acknowledgement=1&page_size=10"
+        )
+        self.assertEqual(listed_again.data["results"], [])
 
     def test_notification_compatibility_routes_list_and_mark_read(self):
         notification = UserNotification.objects.create(

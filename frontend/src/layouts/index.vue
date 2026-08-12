@@ -44,6 +44,10 @@
         <t-header class="header">
           <h1>{{ pageTitle }}</h1>
           <div class="header-right">
+            <t-button v-if="!isAdmin" class="service-entry" variant="outline" @click="enterService">
+              <template #icon><t-icon name="play-circle" /></template>
+              进入使用页面
+            </t-button>
             <t-dropdown :options="userOptions" @click="handleUserAction">
               <t-button class="user-button" variant="text">
                 <t-icon name="user-circle" />
@@ -60,13 +64,32 @@
         </t-content>
       </t-layout>
     </t-layout>
+
+    <t-dialog
+      :visible="Boolean(requiredNotification)"
+      :header="requiredNotification?.title || '重要通知'"
+      :close-btn="false"
+      :close-on-esc-keydown="false"
+      :close-on-overlay-click="false"
+      :cancel-btn="null"
+      :confirm-btn="{ content: '我已阅读', loading: acknowledgingNotification }"
+      width="520px"
+      @confirm="acknowledgeRequiredNotification"
+    >
+      <div v-if="requiredNotification" class="required-notice">
+        <p>{{ requiredNotification.content }}</p>
+        <time>{{ formatDateTime(requiredNotification.created_at) }}</time>
+      </div>
+    </t-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/store/user'
+import request from '@/api/request'
+import { formatDateTime } from '@/utils/billing'
 
 const route = useRoute()
 const router = useRouter()
@@ -76,6 +99,9 @@ const activeMenu = computed(() => route.path)
 const isAdmin = computed(() => userStore.isAdmin)
 const username = computed(() => userStore.username || '管理员')
 const pageTitle = computed(() => String(route.meta.title || (isAdmin.value ? '管理后台' : '用户中心')))
+const requiredNotifications = ref<any[]>([])
+const acknowledgingNotification = ref(false)
+const requiredNotification = computed(() => requiredNotifications.value[0] || null)
 
 type NavigationItem = {
   label: string
@@ -104,7 +130,8 @@ const adminNavigation: NavigationSection[] = [
       { label: '套餐配置', path: '/account/plans', icon: 'money-circle' },
       { label: '商业号池', path: '/account/pools', icon: 'layers' },
       { label: '用户订阅', path: '/account/subscriptions', icon: 'usergroup' },
-      { label: '订单', path: '/account/orders', icon: 'order-ascending' }
+      { label: '订单', path: '/account/orders', icon: 'order-ascending' },
+      { label: '卡密管理', path: '/account/redemption-codes', icon: 'ticket' }
     ]
   },
   {
@@ -125,7 +152,8 @@ const memberNavigation: NavigationSection[] = [
   {
     label: '服务',
     items: [
-      { label: '套餐中心', path: '/account/billing', icon: 'wallet' },
+      { label: '进入使用', path: '/login-chatgpt', icon: 'play-circle' },
+      { label: '卡密充值', path: '/account/billing', icon: 'wallet' },
       { label: '通知', path: '/account/notifications', icon: 'mail' },
       { label: '售后支持', path: '/account/support', icon: 'service' }
     ]
@@ -140,12 +168,35 @@ const handleMenuChange = (value: string) => {
   router.push(value)
 }
 
+const loadRequiredNotifications = async () => {
+  if (isAdmin.value) return
+  const data = await request('/0x/billing/notifications?unread=1&requires_acknowledgement=1&page_size=50')
+  requiredNotifications.value = data?.results || []
+}
+
+const acknowledgeRequiredNotification = async () => {
+  const notification = requiredNotification.value
+  if (!notification) return
+  acknowledgingNotification.value = true
+  const data = await request(`/0x/billing/notifications/${notification.id}/read`, 'POST', {})
+  acknowledgingNotification.value = false
+  if (!data) return
+  requiredNotifications.value.shift()
+}
+
+const enterService = async () => {
+  if (requiredNotification.value) return
+  await router.push({ name: 'LoginChatgpt' })
+}
+
 const handleUserAction = (data: { value: string }) => {
   if (data.value === 'logout') {
     userStore.logout()
     router.push('/login')
   }
 }
+
+onMounted(loadRequiredNotifications)
 </script>
 
 <style scoped>
@@ -305,7 +356,10 @@ const handleUserAction = (data: { value: string }) => {
 .header-right {
   display: flex;
   align-items: center;
+  gap: 10px;
 }
+
+.service-entry { border-radius: 7px; }
 
 .user-button {
   color: #4f4f4b;
@@ -329,6 +383,9 @@ const handleUserAction = (data: { value: string }) => {
   max-width: 1440px;
   margin: 0 auto;
 }
+
+.required-notice p { margin: 0; color: var(--app-text); font-size: 14px; line-height: 1.8; white-space: pre-wrap; }
+.required-notice time { display: block; margin-top: 18px; color: var(--app-text-muted); font-size: 12px; }
 
 @media (max-width: 900px) {
   .sidebar {
@@ -415,6 +472,8 @@ const handleUserAction = (data: { value: string }) => {
   .user-button {
     font-size: 0;
   }
+
+  .service-entry { width: 40px; padding: 0; font-size: 0; }
 
   .user-button :deep(.t-icon) {
     font-size: 18px;

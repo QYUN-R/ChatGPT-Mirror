@@ -152,7 +152,7 @@ class UserChatGPTAccountList(APIView):
                 "access_token_valid": line.access_token_valid,
                 "session_token_valid": line.session_token_valid,
                 "supported_login_modes": supported_login_modes,
-                "default_login_mode": "api",
+                "default_login_mode": "web",
                 "managed_assignment": bool(managed_account),
             })
 

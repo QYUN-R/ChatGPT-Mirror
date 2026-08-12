@@ -4,11 +4,14 @@ from app.billing.models import (
     AccountAssignment,
     Announcement,
     AuditLog,
+    CommercialSettings,
     Order,
     PaymentTransaction,
     Plan,
     PlanOffer,
     PoolAccountPolicy,
+    RedemptionCode,
+    RedemptionCodeBatch,
     SupportContact,
     Subscription,
     UserNotification,
@@ -147,6 +150,7 @@ class OrderSerializer(serializers.ModelSerializer):
             "plan_name",
             "offer_id",
             "offer_name",
+            "entitlement_months",
             "order_type",
             "status",
             "provider",
@@ -156,6 +160,7 @@ class OrderSerializer(serializers.ModelSerializer):
             "payment_expires_at",
             "created_at",
             "paid_at",
+            "entitlement_ends_at",
             "closed_at",
             "provider_order_id",
             "transactions",
@@ -194,6 +199,120 @@ class PaymentTransactionSerializer(serializers.ModelSerializer):
         )
 
 
+class CommercialSettingsSerializer(serializers.ModelSerializer):
+    updated_by_name = serializers.CharField(source="updated_by.username", read_only=True)
+
+    class Meta:
+        model = CommercialSettings
+        fields = (
+            "redemption_enabled",
+            "purchase_url",
+            "updated_by_id",
+            "updated_by_name",
+            "updated_at",
+        )
+
+
+class RedemptionCodeBatchSerializer(serializers.ModelSerializer):
+    plan_name = serializers.SerializerMethodField()
+    offer_name = serializers.SerializerMethodField()
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True)
+    available_count = serializers.SerializerMethodField()
+    redeemed_count = serializers.SerializerMethodField()
+    revoked_count = serializers.SerializerMethodField()
+    archived_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RedemptionCodeBatch
+        fields = (
+            "id",
+            "batch_no",
+            "offer_id",
+            "plan_name",
+            "offer_name",
+            "entitlement_months",
+            "price_cents",
+            "currency",
+            "quantity",
+            "expires_at",
+            "is_active",
+            "is_archived",
+            "note",
+            "created_by_id",
+            "created_by_name",
+            "available_count",
+            "redeemed_count",
+            "revoked_count",
+            "archived_count",
+            "created_at",
+            "updated_at",
+        )
+
+    def get_plan_name(self, obj):
+        return obj.plan_snapshot.get("name") or obj.plan.name
+
+    def get_offer_name(self, obj):
+        return obj.offer_snapshot.get("name") or obj.offer.name
+
+    @staticmethod
+    def _count(obj, annotation, **filters):
+        annotated = getattr(obj, annotation, None)
+        return annotated if annotated is not None else obj.codes.filter(**filters).count()
+
+    def get_available_count(self, obj):
+        return self._count(obj, "available_count", status="AVAILABLE", is_archived=False)
+
+    def get_redeemed_count(self, obj):
+        return self._count(obj, "redeemed_count", status="REDEEMED", is_archived=False)
+
+    def get_revoked_count(self, obj):
+        return self._count(obj, "revoked_count", status="REVOKED", is_archived=False)
+
+    def get_archived_count(self, obj):
+        return self._count(obj, "archived_count", is_archived=True)
+
+
+class RedemptionCodeSerializer(serializers.ModelSerializer):
+    batch_no = serializers.CharField(source="batch.batch_no", read_only=True)
+    plan_name = serializers.SerializerMethodField()
+    offer_name = serializers.SerializerMethodField()
+    username = serializers.CharField(source="redeemed_by.username", read_only=True)
+    order_no = serializers.CharField(source="order.order_no", read_only=True)
+    subscription_ends_at = serializers.DateTimeField(source="subscription.ends_at", read_only=True)
+
+    class Meta:
+        model = RedemptionCode
+        fields = (
+            "id",
+            "serial_no",
+            "code_mask",
+            "batch_id",
+            "batch_no",
+            "plan_name",
+            "offer_name",
+            "status",
+            "is_archived",
+            "username",
+            "redeemed_email",
+            "redeemed_at",
+            "redeemed_ip",
+            "redeemed_user_agent",
+            "order_id",
+            "order_no",
+            "subscription_id",
+            "subscription_ends_at",
+            "revoked_at",
+            "archived_at",
+            "created_at",
+        )
+
+    def get_plan_name(self, obj):
+        return obj.batch.plan_snapshot.get("name") or obj.batch.plan.name
+
+    def get_offer_name(self, obj):
+        return obj.batch.offer_snapshot.get("name") or obj.batch.offer.name
+
+
 class PoolPolicySerializer(serializers.ModelSerializer):
     pool_name = serializers.CharField(source="pool.car_name", read_only=True)
     account_name = serializers.CharField(source="account.chatgpt_username", read_only=True)
@@ -221,6 +340,7 @@ class PoolPolicySerializer(serializers.ModelSerializer):
 
 class NotificationSerializer(serializers.ModelSerializer):
     is_read = serializers.SerializerMethodField()
+    requires_acknowledgement = serializers.SerializerMethodField()
 
     class Meta:
         model = UserNotification
@@ -229,6 +349,7 @@ class NotificationSerializer(serializers.ModelSerializer):
             "kind",
             "title",
             "content",
+            "requires_acknowledgement",
             "is_read",
             "read_at",
             "created_at",
@@ -236,6 +357,9 @@ class NotificationSerializer(serializers.ModelSerializer):
 
     def get_is_read(self, obj):
         return obj.read_at is not None
+
+    def get_requires_acknowledgement(self, obj):
+        return bool(obj.announcement_id and obj.announcement.requires_acknowledgement)
 
 
 class AnnouncementSerializer(serializers.ModelSerializer):

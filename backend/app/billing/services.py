@@ -266,16 +266,39 @@ def _determine_order_type(subscription, target_plan):
 
 
 @transaction.atomic
-def create_order(user, offer, *, provider="mock", idempotency_key=None, actor=None, metadata=None):
+def create_order(
+    user,
+    offer,
+    *,
+    provider="mock",
+    idempotency_key=None,
+    actor=None,
+    metadata=None,
+    allow_unavailable=False,
+    plan_snapshot=None,
+    offer_snapshot=None,
+    entitlement_months=None,
+    price_cents=None,
+    currency=None,
+    target_plan=None,
+):
     provider = str(provider or "manual").strip().lower()
     if not isinstance(offer, PlanOffer):
         offer = PlanOffer.objects.select_related("plan", "plan__pool").get(pk=offer)
     else:
         offer = PlanOffer.objects.select_related("plan", "plan__pool").get(pk=offer.pk)
-    if offer.is_archived or offer.is_draft or not offer.is_purchase_enabled:
+    target_plan = target_plan or offer.plan
+    if target_plan.pk != offer.plan_id:
+        target_plan = target_plan.__class__.objects.select_related("pool").get(pk=target_plan.pk)
+    if not allow_unavailable and (offer.is_archived or offer.is_draft or not offer.is_purchase_enabled):
         raise BillingError("该套餐当前不可购买", code="offer_unavailable")
-    if offer.plan.is_archived or not offer.plan.is_active:
+    if not allow_unavailable and (target_plan.is_archived or not target_plan.is_active):
         raise BillingError("该套餐已下架", code="plan_unavailable")
+    entitlement_months = int(offer.months if entitlement_months is None else entitlement_months)
+    price_cents = offer.price_cents if price_cents is None else int(price_cents)
+    currency = str(currency or offer.currency).upper()
+    if entitlement_months < 1 or price_cents < 0 or not currency:
+        raise BillingError("订单套餐快照无效", code="invalid_order_snapshot")
     if idempotency_key:
         existing = Order.objects.filter(idempotency_key=idempotency_key).first()
         if existing:
@@ -298,31 +321,32 @@ def create_order(user, offer, *, provider="mock", idempotency_key=None, actor=No
             return existing
 
     subscription = refresh_subscription_state(user)
-    order_type = _determine_order_type(subscription, offer.plan)
+    order_type = _determine_order_type(subscription, target_plan)
     if order_type == OrderType.DOWNGRADE and subscription.scheduled_plan_id:
         raise BillingError("已经存在待生效的降级套餐", code="downgrade_already_scheduled")
 
     order = Order.objects.create(
         order_no=f"B{timezone.now():%Y%m%d%H%M%S}{secrets.token_hex(4).upper()}",
         user=user,
-        plan=offer.plan,
+        plan=target_plan,
         offer=offer,
         order_type=order_type,
         provider=provider,
         idempotency_key=idempotency_key,
-        plan_snapshot={
-            "code": offer.plan.code,
-            "name": offer.plan.name,
-            "tagline": offer.plan.tagline,
-            "pool_tier": offer.plan.pool_tier,
+        plan_snapshot=plan_snapshot or {
+            "code": target_plan.code,
+            "name": target_plan.name,
+            "tagline": target_plan.tagline,
+            "pool_tier": target_plan.pool_tier,
         },
-        offer_snapshot={
+        offer_snapshot=offer_snapshot or {
             "code": offer.code,
             "name": offer.name,
             "months": offer.months,
         },
-        price_cents=offer.price_cents,
-        currency=offer.currency,
+        entitlement_months=entitlement_months,
+        price_cents=price_cents,
+        currency=currency,
         payment_expires_at=(
             timezone.now() + timedelta(minutes=max(int(settings.BILLING_ORDER_HOLD_MINUTES), 1))
             if provider == "alipay"
@@ -331,7 +355,7 @@ def create_order(user, offer, *, provider="mock", idempotency_key=None, actor=No
         metadata=metadata or {},
     )
     if order_type != OrderType.RENEW:
-        _reserve_capacity(user=user, plan=offer.plan, order=order, subscription=subscription)
+        _reserve_capacity(user=user, plan=target_plan, order=order, subscription=subscription)
     audit(
         "order.created",
         order,
@@ -387,7 +411,7 @@ def _apply_paid_order(order):
             subscription.status = SubscriptionStatus.ACTIVE
             subscription.source = order.provider
             subscription.starts_at = now
-            subscription.ends_at = add_months(now, order.offer.months)
+            subscription.ends_at = add_months(now, order.entitlement_months)
             subscription.scheduled_plan = None
             subscription.scheduled_offer = None
             subscription.scheduled_months = 0
@@ -400,14 +424,14 @@ def _apply_paid_order(order):
                 status=SubscriptionStatus.ACTIVE,
                 source=order.provider,
                 starts_at=now,
-                ends_at=add_months(now, order.offer.months),
+                ends_at=add_months(now, order.entitlement_months),
             )
         _activate_order_reservation(order, subscription)
     elif order.order_type == OrderType.RENEW:
         if not subscription:
             raise PaymentRejected("续费订单缺少原订阅")
         base = max(subscription.ends_at, now)
-        subscription.ends_at = add_months(base, order.offer.months)
+        subscription.ends_at = add_months(base, order.entitlement_months)
         subscription.offer = order.offer
         subscription.status = SubscriptionStatus.ACTIVE
         subscription.save(update_fields=["ends_at", "offer", "status", "updated_at"])
@@ -419,7 +443,7 @@ def _apply_paid_order(order):
         _release_reservations(subscription)
         subscription.plan = order.plan
         subscription.offer = order.offer
-        subscription.ends_at = add_months(subscription.ends_at, order.offer.months)
+        subscription.ends_at = add_months(subscription.ends_at, order.entitlement_months)
         subscription.status = SubscriptionStatus.ACTIVE
         subscription.source = order.provider
         subscription.save()
@@ -434,7 +458,7 @@ def _apply_paid_order(order):
             raise PaymentRejected("降级订单缺少有效的原套餐")
         subscription.scheduled_plan = order.plan
         subscription.scheduled_offer = order.offer
-        subscription.scheduled_months = order.offer.months
+        subscription.scheduled_months = order.entitlement_months
         subscription.save(update_fields=[
             "scheduled_plan",
             "scheduled_offer",
@@ -447,6 +471,12 @@ def _apply_paid_order(order):
 
     _sync_legacy_expiry(subscription)
     return subscription
+
+
+def _order_entitlement_ends_at(order, subscription):
+    if order.order_type == OrderType.DOWNGRADE:
+        return add_months(subscription.ends_at, order.entitlement_months)
+    return subscription.ends_at
 
 
 def complete_order(order, event: PaymentEvent, *, actor=None, ip_address=None):
@@ -543,8 +573,15 @@ def complete_order(order, event: PaymentEvent, *, actor=None, ip_address=None):
                     subscription = _apply_paid_order(order)
                     order.status = OrderStatus.PAID
                     order.paid_at = timezone.now()
+                    order.entitlement_ends_at = _order_entitlement_ends_at(order, subscription)
                     order.provider_order_id = event.provider_transaction_id
-                    order.save(update_fields=["status", "paid_at", "provider_order_id", "updated_at"])
+                    order.save(update_fields=[
+                        "status",
+                        "paid_at",
+                        "entitlement_ends_at",
+                        "provider_order_id",
+                        "updated_at",
+                    ])
                     UserNotification.objects.create(
                         user=order.user,
                         kind="PAYMENT",

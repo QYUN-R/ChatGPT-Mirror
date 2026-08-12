@@ -99,7 +99,7 @@
     >
       <t-form :data="offerForm" label-width="96px">
         <t-form-item label="所属套餐">
-          <t-select v-model="offerForm.plan_id">
+          <t-select v-model="offerForm.plan_id" :disabled="Boolean(offerForm.id)">
             <t-option v-for="plan in plans.filter(item => !item.is_archived)" :key="plan.id" :value="plan.id" :label="plan.name" />
           </t-select>
         </t-form-item>

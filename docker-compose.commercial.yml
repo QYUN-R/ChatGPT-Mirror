@@ -22,6 +22,8 @@ services:
       BILLING_ENABLED: "${BILLING_ENABLED:-true}"
       BILLING_ENFORCE_SUBSCRIPTION: "${BILLING_ENFORCE_SUBSCRIPTION:-false}"
       BILLING_MOCK_PAYMENTS: "${BILLING_MOCK_PAYMENTS:-false}"
+      REDEMPTION_CODES_ENABLED: "${REDEMPTION_CODES_ENABLED:-false}"
+      REDEMPTION_CODE_KEYRING_PATH: "${REDEMPTION_CODE_KEYRING_PATH:-/run/secrets/redemption_code_keyring}"
       BILLING_ORDER_HOLD_MINUTES: "${BILLING_ORDER_HOLD_MINUTES:-30}"
       PAYMENT_CALLBACK_MAX_AGE_SECONDS: "${PAYMENT_CALLBACK_MAX_AGE_SECONDS:-900}"
       PAYMENT_CALLBACK_MAX_FUTURE_SKEW_SECONDS: "${PAYMENT_CALLBACK_MAX_FUTURE_SKEW_SECONDS:-300}"
@@ -34,6 +36,7 @@ services:
       POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
       CELERY_BROKER_URL: "${CELERY_BROKER_URL:-redis://redis:6379/0}"
       CELERY_RESULT_BACKEND: "${CELERY_RESULT_BACKEND:-redis://redis:6379/1}"
+      DJANGO_CACHE_URL: "${DJANGO_CACHE_URL:-redis://redis:6379/2}"
       EMAIL_HOST_PASSWORD_FILE: "${EMAIL_HOST_PASSWORD_FILE:-/run/secrets/qq_smtp_password}"
     depends_on:
       redis:
@@ -41,6 +44,8 @@ services:
     secrets:
       - source: qq_smtp_password
         target: qq_smtp_password
+      - source: redemption_code_keyring
+        target: redemption_code_keyring
 
   worker:
     image: chatgpt-mirror-commercial-backend:local
@@ -192,3 +197,5 @@ volumes:
 secrets:
   qq_smtp_password:
     file: ./secrets/qq_smtp_password
+  redemption_code_keyring:
+    file: ./secrets/redemption_code_keyring.json

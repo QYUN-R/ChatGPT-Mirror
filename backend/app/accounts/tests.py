@@ -1,7 +1,9 @@
 from unittest.mock import patch
 from datetime import timedelta
+import random
 
 from celery.exceptions import Retry
+from django.core.cache import cache
 from django.db import connection
 from django.contrib.auth.hashers import make_password
 from django.test import TestCase
@@ -19,6 +21,15 @@ from app.accounts.models import (
 )
 from app.accounts.views import UserAccountView, VisitLogView, ChangePasswordView
 from app.accounts.authentication import AUTH_COOKIE_NAME, ExpiringCookieTokenAuthentication
+from app.accounts.captcha import (
+    CAPTCHA_ALPHABET,
+    CAPTCHA_LENGTH,
+    _challenge_cache_key,
+    _glyph_layout,
+    inspect_local_captcha_token,
+    issue_local_captcha,
+    verify_local_captcha,
+)
 from app.accounts.views.cfg import AccessControlView
 from app.accounts.views.login import (
     AccountLogin,
@@ -28,6 +39,7 @@ from app.accounts.views.login import (
     EmailChangeConfirmView,
     PasswordResetConfirmView,
     UserFreeLoginView,
+    LocalCaptchaView,
     verify_turnstile,
 )
 from app.chatgpt.models import ChatgptAccount
@@ -124,6 +136,7 @@ class SecurityRegressionTests(TestCase):
         self.assertIn("billing_enabled", response.data)
 
     @override_settings(CSRF_TRUSTED_ORIGINS=["https://mirror.example"])
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
     @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
     def test_admin_login_issues_csrf_cookie_for_unsafe_api_requests(self):
         User.objects.create_superuser(username="csrf-admin", password="Strong-password-123!")
@@ -165,6 +178,7 @@ class SecurityRegressionTests(TestCase):
         )
         self.assertNotEqual(response.status_code, 403)
 
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
     @patch("app.accounts.views.login.save_visit_log")
     def test_free_login_keeps_shared_token_but_rotates_visitor_subject(self, _save_visit_log):
         User.objects.create_user(username=FREE_ACCOUNT_USERNAME, password="password-123")
@@ -347,6 +361,7 @@ class SecurityRegressionTests(TestCase):
         )
 
     @patch("app.accounts.views.login.TURNSTILE_SECRET_KEY", "test-secret")
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
     @patch("app.accounts.views.login.TURNSTILE_ENABLED", True)
     @patch("app.accounts.views.login.requests.post")
     def test_turnstile_validation_checks_action(self, post):
@@ -368,6 +383,7 @@ class SecurityRegressionTests(TestCase):
         self.assertEqual(post.call_args.kwargs["data"]["response"], "test-token")
 
     @patch("app.accounts.views.login.TURNSTILE_SECRET_KEY", "test-secret")
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
     @patch("app.accounts.views.login.TURNSTILE_ENABLED", True)
     @patch("app.accounts.views.login.requests.post")
     def test_turnstile_rejects_wrong_action(self, post):
@@ -384,6 +400,92 @@ class SecurityRegressionTests(TestCase):
 
         with self.assertRaises(ValidationError):
             verify_turnstile(request, "login")
+
+    @patch("app.accounts.captcha.secrets.choice", side_effect=list("234678"))
+    def test_local_captcha_is_png_scoped_and_single_use(self, _choice):
+        captcha = issue_local_captcha("login")
+        self.assertTrue(captcha["image_data_url"].startswith("data:image/png;base64,"))
+        payload = inspect_local_captcha_token(captcha["captcha_token"])
+        self.assertEqual(payload["action"], "login")
+        self.assertNotIn("answer", payload)
+        self.assertIsNotNone(cache.get(_challenge_cache_key(payload["nonce"])))
+        self.assertEqual(captcha["expires_in"], 120)
+        verify_local_captcha(captcha["captcha_token"], "234678", "login")
+        self.assertIsNone(cache.get(_challenge_cache_key(payload["nonce"])))
+        with self.assertRaises(ValidationError):
+            verify_local_captcha(captcha["captcha_token"], "234678", "login")
+
+    def test_local_captcha_alphabet_avoids_ambiguous_characters(self):
+        self.assertEqual(CAPTCHA_LENGTH, 6)
+        self.assertFalse(set("05BILOSZ").intersection(CAPTCHA_ALPHABET))
+        self.assertGreaterEqual(len(CAPTCHA_ALPHABET) ** CAPTCHA_LENGTH, 300_000_000)
+
+    @patch("app.accounts.views.login.issue_local_captcha")
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", True)
+    def test_local_captcha_issue_rate_is_limited_per_ip(self, issue_captcha):
+        issue_captcha.return_value = {
+            "captcha_token": "signed-token",
+            "image_data_url": "data:image/png;base64,AA==",
+            "expires_in": 120,
+        }
+        cache.clear()
+        view = LocalCaptchaView.as_view()
+        responses = [
+            view(
+                self.factory.get(
+                    "/0x/user/captcha?action=login",
+                    REMOTE_ADDR="198.51.100.77",
+                )
+            )
+            for _ in range(13)
+        ]
+        self.assertTrue(all(response.status_code == 200 for response in responses[:12]))
+        self.assertEqual(responses[12].status_code, 429)
+        cache.clear()
+
+    @patch("app.accounts.captcha.secrets.choice", side_effect=list("234678"))
+    def test_wrong_answer_consumes_the_captcha(self, _choice):
+        captcha = issue_local_captcha("login")
+        with self.assertRaises(ValidationError):
+            verify_local_captcha(captcha["captcha_token"], "AAAAAA", "login")
+        with self.assertRaises(ValidationError) as reused:
+            verify_local_captcha(captcha["captcha_token"], "234678", "login")
+        self.assertIn("已使用", str(reused.exception.detail))
+
+    def test_captcha_layout_has_visible_vertical_variation(self):
+        layout = _glyph_layout(CAPTCHA_LENGTH, random.Random(20260812))
+        y_positions = [item["y"] for item in layout]
+        x_gaps = [layout[index + 1]["x"] - layout[index]["x"] for index in range(CAPTCHA_LENGTH - 1)]
+        self.assertGreaterEqual(max(y_positions) - min(y_positions), 10)
+        self.assertGreaterEqual(len(set(item["rotation"] for item in layout)), 3)
+        self.assertGreater(len(set(x_gaps)), 1)
+
+    @patch("app.accounts.views.login.issue_local_captcha")
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", True)
+    def test_local_captcha_endpoint_uses_same_origin_payload(self, issue_captcha):
+        issue_captcha.return_value = {
+            "captcha_token": "signed-token",
+            "image_data_url": "data:image/png;base64,AA==",
+            "expires_in": 300,
+        }
+        request = self.factory.get("/0x/user/captcha?action=login", REMOTE_ADDR="203.0.113.9")
+        response = LocalCaptchaView.as_view()(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["captcha_token"], "signed-token")
+        issue_captcha.assert_called_once_with("login")
+
+    @patch("app.accounts.views.login.verify_local_captcha")
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", True)
+    @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
+    def test_local_captcha_replaces_external_turnstile(self, verify_captcha):
+        request = APIRequestFactory().post(
+            "/0x/user/login",
+            {"captcha_token": "signed-token", "captcha_answer": "ABC234"},
+            format="json",
+        )
+        request.data = {"captcha_token": "signed-token", "captcha_answer": "ABC234"}
+        verify_turnstile(request, "login")
+        verify_captcha.assert_called_once_with("signed-token", "ABC234", "login")
 
 
 class EmailAuthenticationTests(TestCase):

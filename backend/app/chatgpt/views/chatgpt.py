@@ -226,7 +226,7 @@ class ChatGPTLoginView(APIView):
         )
         user_gpt_id_list = [i.id for i in user_gpt_list]
 
-        login_mode = serializer.data.get("login_mode", "api")
+        login_mode = serializer.validated_data.get("login_mode", "web")
         chatgpt_id = None if managed_account else serializer.validated_data.get("chatgpt_id")
         if chatgpt_id is not None and chatgpt_id not in user_gpt_id_list:
             raise ValidationError("该账号不属于当前用户")
@@ -256,7 +256,7 @@ class ChatGPTLoginView(APIView):
         if login_mode == "api" and not chatgpt.access_token_valid:
             raise ValidationError("该账号当前不支持 API 模式，请联系管理员更新 AccessToken")
         if login_mode == "web" and not chatgpt.session_token_valid:
-            raise ValidationError("该账号当前不支持 Web 模式，请联系管理员更新 SessionToken")
+            raise ValidationError("该账号当前不支持混合模式，请联系管理员更新 SessionToken")
 
         user_name = get_request_subject(request)
         payload = {
