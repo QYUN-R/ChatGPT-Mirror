@@ -198,14 +198,14 @@ REST_FRAMEWORK = {
         "rest_framework.throttling.UserRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
-        "login_ip": "20/min",
+        "login_ip": "120/min",
         "login_account": "10/min",
-        "captcha_issue_ip": "12/min",
-        "email_verification_ip": "20/hour",
+        "captcha_issue_ip": "300/min",
+        "email_verification_ip": "300/hour",
         "email_verification_address": "8/hour",
-        "email_verification_attempt": "40/hour",
+        "email_verification_attempt": "200/hour",
         "redemption_user": "5/min",
-        "redemption_ip": "10/min",
+        "redemption_ip": "60/min",
         "expensive_user": "30/min",
         "user": "120/min",
     },
@@ -387,6 +387,12 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = int(os.environ.get("CELERY_TASK_TIME_LIMIT", "300"))
 CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", False)
+PUBLIC_SITE_URL = os.environ.get("PUBLIC_SITE_URL", "").strip().rstrip("/")
+CELERY_TASK_DEFAULT_QUEUE = "default"
+CELERY_TASK_ROUTES = {
+    "app.accounts.tasks.send_verification_email_task": {"queue": "email"},
+    "app.billing.tasks.send_notification_email_task": {"queue": "email"},
+}
 CELERY_BEAT_SCHEDULE = {
     "billing-expire-reservations-every-five-minutes": {
         "task": "app.billing.tasks.expire_stale_reservations_task",

@@ -15,5 +15,8 @@ exec gunicorn app.wsgi:application \
   --workers "${WEB_CONCURRENCY:-2}" \
   --threads "${WEB_THREADS:-2}" \
   --timeout "${WEB_TIMEOUT:-180}" \
+  --keep-alive "${WEB_KEEPALIVE:-5}" \
+  --max-requests "${WEB_MAX_REQUESTS:-1500}" \
+  --max-requests-jitter "${WEB_MAX_REQUESTS_JITTER:-150}" \
   --access-logfile - \
   --error-logfile -

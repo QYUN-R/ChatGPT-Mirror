@@ -6,7 +6,7 @@
         <p>订单与支付流水只做状态变更，不物理删除</p>
       </div>
       <t-button variant="outline" @click="loadData">
-        <template #icon><t-icon name="refresh" /></template>
+        <template #icon><local-icon name="refresh" /></template>
         刷新
       </t-button>
     </div>

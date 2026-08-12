@@ -6,7 +6,7 @@
         <p>服务使用、续费和异常问题可通过以下方式联系</p>
       </div>
       <t-button variant="outline" @click="loadData">
-        <template #icon><t-icon name="refresh" /></template>
+        <template #icon><local-icon name="refresh" /></template>
         刷新
       </t-button>
     </div>

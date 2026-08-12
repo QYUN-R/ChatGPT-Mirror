@@ -46,7 +46,7 @@ def send_verification_email_task(self, challenge_pk):
 
     try:
         sent_count = send_mail(
-            subject="chat2 邮箱验证码",
+            subject="tuwugpt 邮箱验证码",
             message=verification_message(delivery_code, challenge.purpose),
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[challenge.email],

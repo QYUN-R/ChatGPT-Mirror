@@ -24,7 +24,7 @@
           <p>账号只能加入一个商业号池；Plus、Pro、Team、Business 均可配置，每个账号独立设置承载人数</p>
         </div>
         <t-button theme="primary" @click="openDialog()">
-          <template #icon><t-icon name="add" /></template>
+          <template #icon><local-icon name="add" /></template>
           添加账号策略
         </t-button>
       </div>

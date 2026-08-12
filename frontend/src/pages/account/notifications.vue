@@ -6,7 +6,7 @@
         <p>{{ unreadCount }} 条未读消息</p>
       </div>
       <t-button variant="outline" @click="loadData">
-        <template #icon><t-icon name="refresh" /></template>
+        <template #icon><local-icon name="refresh" /></template>
         刷新
       </t-button>
     </div>

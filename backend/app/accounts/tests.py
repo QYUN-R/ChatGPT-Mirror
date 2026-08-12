@@ -580,10 +580,10 @@ class SecurityRegressionTests(TestCase):
                     REMOTE_ADDR="198.51.100.77",
                 )
             )
-            for _ in range(13)
+            for _ in range(301)
         ]
-        self.assertTrue(all(response.status_code == 200 for response in responses[:12]))
-        self.assertEqual(responses[12].status_code, 429)
+        self.assertTrue(all(response.status_code == 200 for response in responses[:300]))
+        self.assertEqual(responses[300].status_code, 429)
         cache.clear()
 
     @patch("app.accounts.captcha.secrets.choice", side_effect=list("234678"))
@@ -894,6 +894,7 @@ class EmailAuthenticationTests(TestCase):
         user.refresh_from_db()
         self.assertTrue(user.check_password("New-strong-password-456!"))
 
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
     @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
     def test_legacy_user_must_bind_email_before_a_token_is_issued(self):
         user = User.objects.create_user(username="legacy-user", password="Strong-password-123!")

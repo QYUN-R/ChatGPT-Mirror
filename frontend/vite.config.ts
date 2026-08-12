@@ -21,6 +21,14 @@ export default defineConfig({
   },
   build: {
     outDir: '../gateway/static',
-    emptyOutDir: true
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vue: ['vue', 'vue-router', 'pinia'],
+          utilities: ['dayjs', 'js-cookie']
+        }
+      }
+    }
   }
 })

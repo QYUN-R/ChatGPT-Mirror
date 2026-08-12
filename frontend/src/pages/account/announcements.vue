@@ -6,7 +6,7 @@
         <p>发布服务器迁移、故障修复、维护和售后通知</p>
       </div>
       <t-button theme="primary" @click="openDialog()">
-        <template #icon><t-icon name="add" /></template>
+        <template #icon><local-icon name="add" /></template>
         新建公告
       </t-button>
     </div>

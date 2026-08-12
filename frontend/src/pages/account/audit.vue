@@ -6,7 +6,7 @@
         <p>套餐、订单、支付、号池和管理员操作记录</p>
       </div>
       <t-button variant="outline" @click="loadData">
-        <template #icon><t-icon name="refresh" /></template>
+        <template #icon><local-icon name="refresh" /></template>
         刷新
       </t-button>
     </div>

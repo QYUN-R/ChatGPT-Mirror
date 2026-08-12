@@ -765,12 +765,20 @@ def _policy_is_usable(policy):
     account = policy.account
     return (
         policy.enabled
-        and policy.health_status != "DISABLED"
+        and policy.health_status == "HEALTHY"
         and not account.is_archived
         and account.auth_status
         and (account.access_token_valid or account.session_token_valid)
         and supports_commercial_pool_account(account)
     )
+
+
+def _web_probe_invalidates_credentials(error_code):
+    return str(error_code or "").strip().lower() in {
+        "token_invalidated",
+        "invalid_authentication",
+        "authentication_token_invalid",
+    }
 
 
 @transaction.atomic
@@ -806,7 +814,7 @@ def ensure_assignment(subscription, *, reason="first_use", force=False):
             account__is_archived=False,
             account__auth_status=True,
         )
-        .exclude(health_status="DISABLED")
+        .filter(health_status="HEALTHY")
         .order_by("account_id")
     )
     policies = [policy for policy in policies if _policy_is_usable(policy)]
@@ -1086,17 +1094,35 @@ def send_expiry_reminders():
 
 
 def refresh_pool_health():
+    from app.cron import probe_web_session
+
     updated = 0
     policies = PoolAccountPolicy.objects.select_related("account").filter(enabled=True)
     for policy in policies.iterator():
         try:
             policy.account.refresh_auth_diagnostics(force=True)
             policy.account.refresh_from_db()
+            web_healthy = True
+            web_error = ""
+            if settings.PUBLIC_SITE_URL and policy.account.session_token_valid:
+                web_healthy, web_error = probe_web_session(
+                    policy.account,
+                    public_url=settings.PUBLIC_SITE_URL,
+                )
+                if not web_healthy and _web_probe_invalidates_credentials(web_error):
+                    policy.account.access_token_valid = False
+                    policy.account.session_token_valid = False
+                if not web_healthy:
+                    policy.account.last_error = web_error
+                    update_fields = ["last_error", "updated_time"]
+                    if _web_probe_invalidates_credentials(web_error):
+                        update_fields.extend(["access_token_valid", "session_token_valid"])
+                    policy.account.save(update_fields=update_fields)
             policy.health_status = (
                 "HEALTHY"
                 if policy.account.auth_status and (
                     policy.account.access_token_valid or policy.account.session_token_valid
-                )
+                ) and web_healthy
                 else "DEGRADED"
             )
         except Exception:

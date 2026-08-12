@@ -3,7 +3,7 @@
     <t-card title="账号池" subtitle="将上游账号按使用场景组织为不同账号池" :bordered="false">
       <template #actions>
         <t-button theme="primary" @click="showAddDialog">
-          <template #icon><t-icon name="add" /></template>
+          <template #icon><local-icon name="add" /></template>
           添加号池
         </t-button>
       </template>
@@ -111,7 +111,7 @@ const fetchData = async () => {
   loading.value = true
   const data = await request(`/0x/chatgpt/car?page=${pagination.current}&page_size=${pagination.pageSize}`)
   loading.value = false
-  
+
   if (data) {
     tableData.value = data.results || []
     pagination.total = data.count || 0
@@ -166,7 +166,7 @@ const handleSubmit = async () => {
   if (valid !== true) return
 
   submitLoading.value = true
-  
+
   const url = '/0x/chatgpt/car'
   const method = 'POST'
   const payload = isEdit.value ? {

@@ -3,7 +3,7 @@
     <t-card title="用户" subtitle="管理可访问系统的用户、账号池和模型权限" :bordered="false">
       <template #actions>
         <t-button theme="primary" @click="showAddDialog">
-          <template #icon><t-icon name="add" /></template>
+          <template #icon><local-icon name="add" /></template>
           添加用户
         </t-button>
       </template>
@@ -254,7 +254,7 @@ const fetchData = async () => {
   if (statusFilter.value) params.set('status', statusFilter.value)
   const data = await request(`/0x/user?${params.toString()}`)
   loading.value = false
-  
+
   if (data) {
     tableData.value = data.results || []
     pagination.total = data.count || 0
@@ -325,7 +325,7 @@ const handleSubmit = async () => {
     .split(/[,\n]/)
     .map(item => item.trim())
     .filter(Boolean)
-  
+
   const url = '/0x/user'
   const method = 'POST'
   const payload = {

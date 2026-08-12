@@ -7,7 +7,7 @@
           <p>维护用户后台展示的售后方式、联系方式和二维码</p>
         </div>
         <t-button theme="primary" @click="openDialog()">
-          <template #icon><t-icon name="add" /></template>
+          <template #icon><local-icon name="add" /></template>
           新增联系方式
         </t-button>
       </div>
@@ -65,7 +65,7 @@
             <input ref="qrFileInput" class="file-input" type="file" accept="image/png,image/jpeg,image/webp" @change="onQrFileChange" />
             <div class="qr-actions">
               <t-button variant="outline" @click="selectQrFile">
-                <template #icon><t-icon name="upload" /></template>
+                <template #icon><local-icon name="upload" /></template>
                 选择二维码
               </t-button>
               <t-button v-if="form.qr_image" variant="text" theme="danger" @click="clearQrImage">移除</t-button>

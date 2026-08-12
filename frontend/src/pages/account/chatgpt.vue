@@ -4,11 +4,11 @@
       <template #actions>
         <t-space>
           <t-button :loading="checkingAll" @click="handleCheckTokenExpiry()">
-            <template #icon><t-icon name="search" /></template>
+            <template #icon><local-icon name="search" /></template>
             一键检测
           </t-button>
           <t-button theme="primary" @click="showAddDialog">
-            <template #icon><t-icon name="add" /></template>
+            <template #icon><local-icon name="add" /></template>
             添加账号
           </t-button>
         </t-space>

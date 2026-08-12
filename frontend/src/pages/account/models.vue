@@ -3,7 +3,7 @@
     <t-card title="模型管理" :bordered="false">
       <template #actions>
         <t-button theme="primary" @click="showAddDialog">
-          <template #icon><t-icon name="add" /></template>
+          <template #icon><local-icon name="add" /></template>
           添加模型
         </t-button>
       </template>
@@ -15,8 +15,8 @@
         row-key="id"
       >
         <template #enabled="{ row }">
-          <t-switch 
-            :value="row.enabled" 
+          <t-switch
+            :value="row.enabled"
             @change="(val: boolean) => handleToggle(row, val)"
           />
         </template>
@@ -41,10 +41,10 @@
     >
       <t-form :data="formData" :rules="formRules" ref="formRef" label-width="100px">
         <t-form-item label="模型ID" name="id">
-          <t-input 
-            v-model="formData.id" 
-            :disabled="isEdit" 
-            placeholder="请输入模型ID，如 gpt-4o" 
+          <t-input
+            v-model="formData.id"
+            :disabled="isEdit"
+            placeholder="请输入模型ID，如 gpt-4o"
           />
         </t-form-item>
         <t-form-item label="显示名称" name="name">
@@ -108,7 +108,7 @@ const fetchData = async () => {
   loading.value = true
   const data = await request('/0x/models')
   loading.value = false
-  
+
   if (data) {
     tableData.value = data.models || []
   }
@@ -141,11 +141,11 @@ const handleSubmit = async () => {
   if (valid !== true) return
 
   submitLoading.value = true
-  
+
   let data
   if (isEdit.value) {
     // 编辑时更新整个列表
-    const updatedModels = tableData.value.map(m => 
+    const updatedModels = tableData.value.map(m =>
       m.id === formData.id ? { ...formData } : m
     )
     data = await request('/0x/models', 'PUT', { models: updatedModels })
@@ -153,7 +153,7 @@ const handleSubmit = async () => {
     // 添加新模型
     data = await request('/0x/models', 'POST', formData)
   }
-  
+
   submitLoading.value = false
 
   if (data) {
@@ -168,7 +168,7 @@ const handleToggle = async (row: ModelInfo, enabled: boolean) => {
     id: row.id,
     enabled
   })
-  
+
   if (data) {
     MessagePlugin.success('状态更新成功')
     fetchData()

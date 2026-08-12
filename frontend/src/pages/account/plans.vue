@@ -9,7 +9,7 @@
         <t-space>
           <t-button variant="outline" @click="openOfferDialog()">新增价格</t-button>
           <t-button theme="primary" @click="openPlanDialog()">
-            <template #icon><t-icon name="add" /></template>
+            <template #icon><local-icon name="add" /></template>
             新增套餐
           </t-button>
         </t-space>

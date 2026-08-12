@@ -9,11 +9,11 @@
           </div>
           <t-space>
             <t-button variant="outline" @click="loadData">
-              <template #icon><t-icon name="refresh" /></template>
+              <template #icon><local-icon name="refresh" /></template>
               刷新
             </t-button>
             <t-button theme="primary" :disabled="!me?.service_available" @click="enterService">
-              <template #icon><t-icon name="play-circle" /></template>
+              <template #icon><local-icon name="play-circle" /></template>
               进入使用页面
             </t-button>
           </t-space>
@@ -47,7 +47,7 @@
             <span>购买卡密并完成兑换后即可进入使用页面。</span>
           </div>
           <t-button v-if="purchaseUrl" theme="primary" @click="openPurchaseLink">
-            <template #icon><t-icon name="cart" /></template>
+            <template #icon><local-icon name="cart" /></template>
             购买卡密
           </t-button>
         </div>
@@ -65,7 +65,7 @@
             <p>卡密仅可使用一次，兑换成功后套餐立即生效或续期</p>
           </div>
           <t-button v-if="purchaseUrl" variant="outline" @click="openPurchaseLink">
-            <template #icon><t-icon name="cart" /></template>
+            <template #icon><local-icon name="cart" /></template>
             购买卡密
           </t-button>
         </div>

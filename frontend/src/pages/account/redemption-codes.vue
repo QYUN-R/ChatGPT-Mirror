@@ -25,7 +25,7 @@
           <p>卡密绑定生成时选择的套餐价格方案，明文仅展示一次</p>
         </div>
         <t-button theme="primary" @click="openGenerateDialog">
-          <template #icon><t-icon name="add" /></template>
+          <template #icon><local-icon name="add" /></template>
           批量生成
         </t-button>
       </div>

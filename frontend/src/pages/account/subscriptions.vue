@@ -6,7 +6,7 @@
         <p>手动开通、续期、暂停和同池账号迁移</p>
       </div>
       <t-button theme="primary" @click="openGrantDialog">
-        <template #icon><t-icon name="add" /></template>
+        <template #icon><local-icon name="add" /></template>
         手动开通
       </t-button>
     </div>

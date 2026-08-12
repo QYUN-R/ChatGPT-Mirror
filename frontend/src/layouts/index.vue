@@ -4,14 +4,14 @@
       <t-aside class="sidebar" :class="{ 'sidebar-open': mobileMenuOpen }" width="232px">
         <div class="sidebar-title">
           <div class="brand-lockup">
-            <t-icon class="brand-icon" name="dashboard" />
+            <local-icon class="brand-icon" name="dashboard" />
             <div class="brand-copy">
               <strong>tuwugpt</strong>
               <span>{{ isAdmin ? '管理后台' : '用户中心' }}</span>
             </div>
           </div>
           <t-button class="mobile-close-button" variant="text" shape="square" aria-label="关闭导航" @click="mobileMenuOpen = false">
-            <template #icon><t-icon name="close" /></template>
+            <template #icon><local-icon name="close" /></template>
           </t-button>
         </div>
         <nav class="navigation" :aria-label="isAdmin ? '管理后台导航' : '用户中心导航'">
@@ -20,7 +20,7 @@
               <p class="nav-section-label">{{ section.label }}</p>
               <t-menu class="nav-menu" :value="activeMenu" theme="light" @change="handleMenuChange">
                 <t-menu-item v-for="item in section.items" :key="item.path" :value="item.path">
-                  <template #icon><t-icon :name="item.icon" /></template>
+                  <template #icon><local-icon :name="item.icon" /></template>
                   <span class="menu-label">{{ item.label }}</span>
                 </t-menu-item>
               </t-menu>
@@ -31,7 +31,7 @@
               <p class="nav-section-label">{{ section.label }}</p>
               <t-menu class="nav-menu" :value="activeMenu" theme="light" @change="handleMenuChange">
                 <t-menu-item v-for="item in section.items" :key="item.path" :value="item.path">
-                  <template #icon><t-icon :name="item.icon" /></template>
+                  <template #icon><local-icon :name="item.icon" /></template>
                   <span class="menu-label">{{ item.label }}</span>
                 </t-menu-item>
               </t-menu>
@@ -40,7 +40,7 @@
         </nav>
         <div class="sidebar-footer">
           <t-button class="profile-link" variant="text" block @click="router.push('/account/profile')">
-            <template #icon><t-icon name="user-circle" /></template>
+            <template #icon><local-icon name="user-circle" /></template>
             <span>{{ isAdmin ? '账户设置' : '账户中心' }}</span>
           </t-button>
         </div>
@@ -50,16 +50,16 @@
         <t-header class="header">
           <div class="header-title">
             <t-button class="mobile-menu-button" variant="text" shape="square" aria-label="打开导航" @click="mobileMenuOpen = true">
-              <template #icon><t-icon name="menu" /></template>
+              <template #icon><local-icon name="menu" /></template>
             </t-button>
             <h1>{{ pageTitle }}</h1>
           </div>
           <div class="header-right">
             <t-dropdown :options="userOptions" @click="handleUserAction">
               <t-button class="user-button" variant="text">
-                <t-icon name="user-circle" />
+                <local-icon name="user-circle" />
                 {{ username }}
-                <t-icon name="chevron-down" />
+                <local-icon name="chevron-down" />
               </t-button>
             </t-dropdown>
           </div>

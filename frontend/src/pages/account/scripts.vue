@@ -7,7 +7,7 @@
             刷新
           </t-button>
           <t-button theme="primary" @click="addScript">
-            <template #icon><t-icon name="add" /></template>
+            <template #icon><local-icon name="add" /></template>
             新增脚本
           </t-button>
         </t-space>
