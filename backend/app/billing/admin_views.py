@@ -3,8 +3,10 @@ import time
 import ipaddress
 
 from django.shortcuts import get_object_or_404
+from django.db import transaction
 from django.db.models import Count, Q
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
@@ -19,6 +21,7 @@ from app.billing.models import (
     Order,
     Plan,
     PlanOffer,
+    PlanPool,
     PoolAccountPolicy,
     RedemptionCode,
     RedemptionCodeBatch,
@@ -52,6 +55,7 @@ from app.billing.services import (
 from app.billing.redemption import (
     archive_redeemed_codes,
     create_redemption_batch,
+    delete_redeemed_codes,
     lookup_redemption_code,
     restore_archived_codes,
     revoke_redemption_codes,
@@ -70,7 +74,7 @@ class AdminPlanView(APIView):
     permission_classes = (IsAuthenticated, IsAdminUser)
 
     def get(self, request):
-        plans = Plan.objects.select_related("pool").prefetch_related("offers").all()
+        plans = Plan.objects.select_related("pool").prefetch_related("offers", "pool_links__pool").all()
         return Response({
             "plans": PlanSerializer(
                 plans,
@@ -83,25 +87,75 @@ class AdminPlanView(APIView):
     def post(self, request):
         action = request.data.get("action") or "save_plan"
         if action == "save_plan":
-            plan = Plan.objects.filter(pk=request.data.get("id")).first() or Plan()
-            requested_pool = get_object_or_404(ChatgptCar, pk=request.data.get("pool_id"))
-            requested_tier = request.data.get("pool_tier")
-            if plan.pk and plan.redemption_batches.exists() and (
-                plan.pool_id != requested_pool.id or plan.pool_tier != requested_tier
-            ):
-                raise ValidationError({"pool_id": "已有卡密批次的套餐不能更换号池或等级"})
-            plan.code = str(request.data.get("code") or "").strip()
-            plan.name = str(request.data.get("name") or "").strip()
-            plan.tagline = str(request.data.get("tagline") or "").strip()
-            plan.pool = requested_pool
-            plan.pool_tier = requested_tier
-            plan.is_active = bool(request.data.get("is_active", True))
-            plan.is_public = bool(request.data.get("is_public", True))
-            plan.sort_order = int(request.data.get("sort_order") or 0)
+            requested_pool_ids = request.data.get("pool_ids") or (
+                [request.data.get("pool_id")] if request.data.get("pool_id") else []
+            )
             try:
-                plan.save()
-            except DjangoValidationError as exc:
-                raise ValidationError(exc.message_dict)
+                requested_pool_ids = list(dict.fromkeys(int(item) for item in requested_pool_ids))
+            except (TypeError, ValueError):
+                raise ValidationError({"pool_ids": "关联号池格式无效"})
+            if not requested_pool_ids:
+                raise ValidationError({"pool_ids": "请至少关联一个号池"})
+            requested_pools = list(ChatgptCar.objects.filter(pk__in=requested_pool_ids))
+            pools_by_id = {pool.id: pool for pool in requested_pools}
+            if len(requested_pools) != len(requested_pool_ids):
+                raise ValidationError({"pool_ids": "部分关联号池不存在"})
+            requested_pool = pools_by_id[requested_pool_ids[0]]
+            requested_tier = request.data.get("pool_tier")
+            try:
+                user_limit = int(request.data.get("user_limit") or 0)
+                daily_quota = int(request.data.get("daily_quota") or 0)
+                monthly_quota = int(request.data.get("monthly_quota") or 0)
+                sort_order = int(request.data.get("sort_order") or 0)
+            except (TypeError, ValueError):
+                raise ValidationError({"message": "套餐限额和排序必须是整数"})
+            if min(user_limit, daily_quota, monthly_quota, sort_order) < 0:
+                raise ValidationError({"message": "套餐限额和排序不能小于 0"})
+            with transaction.atomic():
+                plan = Plan.objects.select_for_update().filter(pk=request.data.get("id")).first() or Plan()
+                quotas_changed = (
+                    not plan.pk
+                    or plan.daily_quota != daily_quota
+                    or plan.monthly_quota != monthly_quota
+                )
+                if plan.pk and plan.redemption_batches.exists() and plan.pool_tier != requested_tier:
+                    raise ValidationError({"pool_tier": "已有卡密批次的套餐不能更换等级"})
+                plan.code = str(request.data.get("code") or "").strip()
+                plan.name = str(request.data.get("name") or "").strip()
+                plan.tagline = str(request.data.get("tagline") or "").strip()
+                plan.pool = requested_pool
+                plan.pool_tier = requested_tier
+                plan.user_limit = user_limit
+                plan.daily_quota = daily_quota
+                plan.monthly_quota = monthly_quota
+                plan.is_active = bool(request.data.get("is_active", True))
+                plan.is_public = bool(request.data.get("is_public", True))
+                plan.sort_order = sort_order
+                try:
+                    if plan.pk:
+                        PlanPool.objects.filter(plan=plan).exclude(pool_id__in=requested_pool_ids).delete()
+                    plan.save()
+                    for priority, pool_id in enumerate(requested_pool_ids):
+                        link, _ = PlanPool.objects.get_or_create(
+                            plan=plan,
+                            pool=pools_by_id[pool_id],
+                            defaults={"priority": priority, "is_active": True},
+                        )
+                        link.priority = priority
+                        link.is_active = True
+                        link.save(update_fields=["priority", "is_active", "updated_at"])
+                    if quotas_changed:
+                        User.objects.filter(
+                            billing_subscription__plan=plan,
+                            billing_subscription__status="ACTIVE",
+                            billing_subscription__ends_at__gt=timezone.now(),
+                        ).update(
+                            daily_quota=plan.daily_quota,
+                            monthly_quota=plan.monthly_quota,
+                        )
+                except DjangoValidationError as exc:
+                    raise ValidationError(exc.message_dict)
+                plan = Plan.objects.select_related("pool").prefetch_related("offers", "pool_links__pool").get(pk=plan.pk)
             return Response({"plan": PlanSerializer(plan, context={"admin": True}).data})
         if action == "save_offer":
             offer = PlanOffer.objects.filter(pk=request.data.get("id")).first() or PlanOffer()
@@ -498,7 +552,7 @@ class AdminRedemptionCodeView(APIView):
         redeemed_from = request.query_params.get("redeemed_from")
         redeemed_to = request.query_params.get("redeemed_to")
         if request.query_params.get("include_archived") not in ("1", "true"):
-            queryset = queryset.filter(is_archived=False)
+            queryset = queryset.filter(is_archived=False, batch__is_archived=False)
         if batch_id:
             queryset = queryset.filter(batch_id=batch_id)
         if status:
@@ -578,6 +632,10 @@ class AdminRedemptionCodeView(APIView):
                 )
             elif action == "archive_redeemed":
                 count = archive_redeemed_codes(
+                    code_ids=code_ids, actor=request.user, ip_address=ip_address
+                )
+            elif action == "delete_redeemed":
+                count = delete_redeemed_codes(
                     code_ids=code_ids, actor=request.user, ip_address=ip_address
                 )
             elif action == "restore":

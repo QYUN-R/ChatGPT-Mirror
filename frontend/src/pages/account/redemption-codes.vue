@@ -60,6 +60,26 @@
         </template>
       </t-table>
       </div>
+      <div class="mobile-batch-list">
+        <article v-for="row in batches" :key="row.id" class="mobile-batch-card">
+          <div class="mobile-card-heading">
+            <div><strong>{{ row.plan_name }} · {{ row.offer_name }}</strong><span>{{ row.batch_no }}</span></div>
+            <t-tag :theme="row.is_archived ? 'default' : row.is_active ? 'success' : 'warning'" variant="light">
+              {{ row.is_archived ? '已归档' : row.is_active ? '启用' : '已停用' }}
+            </t-tag>
+          </div>
+          <div class="mobile-card-grid">
+            <span>总数<strong>{{ row.quantity }}</strong></span>
+            <span>未使用<strong>{{ row.available_count }}</strong></span>
+            <span>已使用<strong>{{ row.redeemed_count }}</strong></span>
+            <span>失效时间<strong>{{ row.expires_at ? formatDateTime(row.expires_at) : '永久有效' }}</strong></span>
+          </div>
+          <div class="mobile-card-actions">
+            <t-button variant="outline" @click="filterBatch(row)">查看卡密</t-button>
+            <t-button v-if="!row.is_archived" variant="outline" @click="batchAction(row, row.is_active ? 'disable' : 'enable')">{{ row.is_active ? '停用' : '启用' }}</t-button>
+          </div>
+        </article>
+      </div>
     </section>
 
     <section class="admin-section">
@@ -70,7 +90,10 @@
         </div>
         <t-space>
           <t-button variant="outline" @click="lookupVisible = true">核验完整卡密</t-button>
-          <t-button variant="outline" :disabled="!selectedRedeemedIds.length" @click="codeAction('archive_redeemed')">归档已使用</t-button>
+          <t-button variant="outline" :disabled="!selectedArchivableRedeemedIds.length" @click="codeAction('archive_redeemed')">归档已使用</t-button>
+          <t-popconfirm content="删除后无法恢复，但不会影响用户已开通的套餐、订单和有效期" @confirm="codeAction('delete_redeemed')">
+            <t-button theme="danger" variant="outline" :disabled="!selectedDeletableRedeemedIds.length">删除已使用</t-button>
+          </t-popconfirm>
           <t-button variant="outline" :disabled="!selectedAvailableIds.length" @click="codeAction('revoke')">撤销未使用</t-button>
           <t-button v-if="includeArchived" variant="outline" :disabled="!selectedArchivedIds.length" @click="codeAction('restore')">恢复归档</t-button>
         </t-space>
@@ -110,6 +133,25 @@
         <template #redeemed_ip="{ row }"><span class="mono">{{ row.redeemed_ip || '-' }}</span></template>
         <template #order="{ row }"><div class="primary-cell"><strong>{{ row.order_no || '-' }}</strong><span>{{ formatDateTime(row.subscription_ends_at) }}</span></div></template>
       </t-table>
+      </div>
+      <div class="mobile-code-list">
+        <article v-for="row in codes" :key="row.id" class="mobile-code-card" :class="{ redeemed: row.status === 'REDEEMED' }">
+          <div class="mobile-card-heading">
+            <div><strong>{{ row.serial_no }}</strong><span class="mono">{{ row.code_mask }}</span></div>
+            <t-tag :theme="statusTheme(row)" variant="light">{{ statusLabel(row) }}</t-tag>
+          </div>
+          <dl>
+            <div><dt>套餐</dt><dd>{{ row.plan_name }} · {{ row.offer_name }}</dd></div>
+            <div><dt>兑换用户</dt><dd>{{ row.username || '-' }} / {{ row.redeemed_email || '-' }}</dd></div>
+            <div><dt>兑换时间</dt><dd>{{ formatDateTime(row.redeemed_at) }}</dd></div>
+            <div><dt>兑换 IP</dt><dd class="mono">{{ row.redeemed_ip || '-' }}</dd></div>
+          </dl>
+          <div v-if="row.status === 'REDEEMED'" class="mobile-code-actions">
+            <t-popconfirm content="删除后无法恢复，但不会影响用户已开通的套餐" @confirm="codeAction('delete_redeemed', [row.id])">
+              <t-button theme="danger" variant="outline">删除记录</t-button>
+            </t-popconfirm>
+          </div>
+        </article>
       </div>
       <div class="summary-line">
         <span>未使用 {{ summary.available }}</span><span>已使用 {{ summary.redeemed }}</span><span>已撤销 {{ summary.revoked }}</span><span>已归档 {{ summary.archived }}</span>
@@ -152,10 +194,14 @@
     </t-dialog>
 
     <t-dialog v-model:visible="plaintextVisible" header="卡密已生成" width="760px" :footer="false" :close-on-overlay-click="false" @close="clearGeneratedCodes">
-      <t-alert theme="warning" message="完整卡密只在本窗口显示一次。关闭前请复制或下载 CSV，后台之后无法恢复明文。" />
+      <t-alert theme="warning" message="完整卡密只在本窗口显示一次。关闭前请复制或导出文件，后台之后无法恢复明文。" />
       <div class="plaintext-actions">
         <strong>{{ generatedBatch?.batch_no }} · {{ generatedCodes.length }} 张</strong>
-        <t-space><t-button variant="outline" @click="copyGenerated">复制全部</t-button><t-button theme="primary" @click="downloadCsv">下载 CSV</t-button></t-space>
+        <t-space class="export-actions">
+          <t-button variant="outline" @click="copyGenerated">复制卡密</t-button>
+          <t-button variant="outline" @click="downloadTxt">导出卡网 TXT</t-button>
+          <t-button theme="primary" @click="downloadCsv">导出完整 CSV</t-button>
+        </t-space>
       </div>
       <div class="plaintext-list">
         <div v-for="item in generatedCodes" :key="item.serial_no"><span>{{ item.serial_no }}</span><code>{{ item.code }}</code></div>
@@ -200,7 +246,8 @@ const selectedRows = computed(() => {
   const selected = new Set(selectedRowKeys.value.map(value => Number(value)))
   return codes.value.filter(row => selected.has(Number(row.id)))
 })
-const selectedRedeemedIds = computed(() => selectedRows.value.filter(row => row.status === 'REDEEMED' && !row.is_archived).map(row => row.id))
+const selectedDeletableRedeemedIds = computed(() => selectedRows.value.filter(row => row.status === 'REDEEMED').map(row => row.id))
+const selectedArchivableRedeemedIds = computed(() => selectedRows.value.filter(row => row.status === 'REDEEMED' && !row.is_archived).map(row => row.id))
 const selectedAvailableIds = computed(() => selectedRows.value.filter(row => row.status === 'AVAILABLE' && !row.is_archived).map(row => row.id))
 const selectedArchivedIds = computed(() => selectedRows.value.filter(row => row.is_archived).map(row => row.id))
 
@@ -226,54 +273,90 @@ const loadSettings = async () => { const data = await request('/0x/admin/redempt
 const loadPlans = async () => { const data = await request('/0x/admin/plans'); plans.value = data?.plans || [] }
 const loadBatches = async () => {
   loadingBatches.value = true
-  const data = await request(`/0x/admin/redemption-batches?include_archived=${includeArchived.value ? 1 : 0}`)
-  batches.value = data?.batches || []
-  loadingBatches.value = false
+  try {
+    const data = await request(`/0x/admin/redemption-batches?include_archived=${includeArchived.value ? 1 : 0}`)
+    batches.value = data?.batches || []
+  } finally {
+    loadingBatches.value = false
+  }
 }
 const loadCodes = async () => {
   loadingCodes.value = true
   const params = new URLSearchParams({ page: String(pagination.current), page_size: String(pagination.pageSize), include_archived: includeArchived.value ? '1' : '0' })
   if (filters.batch_id) params.set('batch_id', String(filters.batch_id)); if (filters.status) params.set('status', filters.status)
   if (filters.q.trim()) params.set('q', filters.q.trim()); if (filters.ip.trim()) params.set('ip', filters.ip.trim())
-  const data = await request(`/0x/admin/redemption-codes?${params.toString()}`)
-  codes.value = data?.results || []; pagination.total = data?.count || 0; Object.assign(summary, data?.summary || {})
-  selectedRowKeys.value = []; loadingCodes.value = false
+  try {
+    const data = await request(`/0x/admin/redemption-codes?${params.toString()}`)
+    codes.value = data?.results || []; pagination.total = data?.count || 0; Object.assign(summary, data?.summary || {})
+    selectedRowKeys.value = []
+  } finally {
+    loadingCodes.value = false
+  }
 }
-const saveSettings = async () => { savingSettings.value = true; const data = await request('/0x/admin/redemption-settings', 'POST', settings); savingSettings.value = false; if (data) MessagePlugin.success('卡密设置已保存') }
+const saveSettings = async () => { savingSettings.value = true; try { const data = await request('/0x/admin/redemption-settings', 'POST', settings); if (data) MessagePlugin.success('卡密设置已保存') } finally { savingSettings.value = false } }
 const openGenerateDialog = () => { generateForm.offer_id = offerOptions.value[0]?.id || null; generateForm.quantity = 10; generateForm.expires_at = ''; generateForm.note = ''; generateVisible.value = true }
 const generateBatch = async () => {
   generating.value = true
-  const data = await request('/0x/admin/redemption-batches', 'POST', { action: 'generate', ...generateForm, expires_at: generateForm.expires_at || null })
-  generating.value = false
-  if (!data?.batch) return
-  generatedBatch.value = data.batch; generatedCodes.value = data.plaintext_codes || []; generateVisible.value = false; plaintextVisible.value = true
-  MessagePlugin.success(`已生成 ${generatedCodes.value.length} 张卡密`); await Promise.all([loadBatches(), loadCodes()])
+  try {
+    const data = await request('/0x/admin/redemption-batches', 'POST', { action: 'generate', ...generateForm, expires_at: generateForm.expires_at || null })
+    if (!data?.batch) return
+    generatedBatch.value = data.batch; generatedCodes.value = data.plaintext_codes || []; generateVisible.value = false; plaintextVisible.value = true
+    MessagePlugin.success(`已生成 ${generatedCodes.value.length} 张卡密`); await Promise.all([loadBatches(), loadCodes()])
+  } finally {
+    generating.value = false
+  }
 }
 const batchAction = async (row: any, action: string) => { const data = await request('/0x/admin/redemption-batches', 'POST', { action, batch_id: row.id }); if (data) { MessagePlugin.success('批次状态已更新'); await Promise.all([loadBatches(), loadCodes()]) } }
-const codeAction = async (action: string) => {
-  const ids = action === 'archive_redeemed' ? selectedRedeemedIds.value : action === 'revoke' ? selectedAvailableIds.value : selectedArchivedIds.value
+const codeAction = async (action: string, explicitIds: number[] = []) => {
+  const ids = explicitIds.length
+    ? explicitIds
+    : action === 'archive_redeemed'
+      ? selectedArchivableRedeemedIds.value
+      : action === 'delete_redeemed'
+        ? selectedDeletableRedeemedIds.value
+      : action === 'revoke'
+        ? selectedAvailableIds.value
+        : selectedArchivedIds.value
   const data = await request('/0x/admin/redemption-codes', 'POST', { action, code_ids: ids })
-  if (data) { MessagePlugin.success(`已处理 ${data.count} 张卡密`); await Promise.all([loadBatches(), loadCodes()]) }
+  if (data) {
+    MessagePlugin.success(action === 'delete_redeemed' ? `已删除 ${data.count} 条已使用卡密记录` : `已处理 ${data.count} 张卡密`)
+    await Promise.all([loadBatches(), loadCodes()])
+  }
 }
 const lookupFullCode = async () => {
   if (!lookupCode.value.trim()) return
   lookupLoading.value = true
-  const data = await request('/0x/admin/redemption-codes', 'POST', { action: 'lookup', code: lookupCode.value.trim() })
-  lookupLoading.value = false
-  lookupCode.value = ''
-  lookupResult.value = data?.code || null
+  try {
+    const data = await request('/0x/admin/redemption-codes', 'POST', { action: 'lookup', code: lookupCode.value.trim() })
+    lookupCode.value = ''
+    lookupResult.value = data?.code || null
+  } finally {
+    lookupLoading.value = false
+  }
 }
 const clearLookup = () => { lookupCode.value = ''; lookupResult.value = null }
 const filterBatch = (row: any) => { filters.batch_id = row.id; pagination.current = 1; loadCodes() }
 const applyFilters = () => { pagination.current = 1; Promise.all([loadBatches(), loadCodes()]) }
 const onPageChange = (info: any) => { pagination.current = info.current; pagination.pageSize = info.pageSize; loadCodes() }
-const generatedText = () => generatedCodes.value.map(item => `${item.serial_no}\t${item.code}`).join('\n')
+const generatedText = () => generatedCodes.value.map(item => item.code).join('\n')
 const copyGenerated = async () => { await navigator.clipboard.writeText(generatedText()); MessagePlugin.success('卡密已复制') }
 const csvEscape = (value: string) => `"${String(value).replace(/"/g, '""')}"`
+const downloadFile = (content: string, type: string, suffix: string) => {
+  const url = URL.createObjectURL(new Blob([content], { type })); const link = document.createElement('a')
+  link.href = url; link.download = `${generatedBatch.value?.batch_no || 'redemption-codes'}.${suffix}`; link.click(); URL.revokeObjectURL(url)
+}
+const downloadTxt = () => downloadFile(`\uFEFF${generatedText()}\n`, 'text/plain;charset=utf-8', 'txt')
 const downloadCsv = () => {
-  const csv = '\uFEFF序列号,卡密\r\n' + generatedCodes.value.map(item => `${csvEscape(item.serial_no)},${csvEscape(item.code)}`).join('\r\n')
-  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })); const link = document.createElement('a')
-  link.href = url; link.download = `${generatedBatch.value?.batch_no || 'redemption-codes'}.csv`; link.click(); URL.revokeObjectURL(url)
+  const csv = '\uFEFF序列号,卡密,批次号,套餐,方案,有效月数,失效时间\r\n' + generatedCodes.value.map(item => [
+    item.serial_no,
+    item.code,
+    generatedBatch.value?.batch_no || '',
+    generatedBatch.value?.plan_name || '',
+    generatedBatch.value?.offer_name || '',
+    generatedBatch.value?.entitlement_months || '',
+    generatedBatch.value?.expires_at || '永久有效'
+  ].map(csvEscape).join(',')).join('\r\n')
+  downloadFile(csv, 'text/csv;charset=utf-8', 'csv')
 }
 const clearGeneratedCodes = () => { generatedCodes.value = []; generatedBatch.value = null }
 
@@ -295,6 +378,7 @@ onMounted(() => Promise.all([loadSettings(), loadPlans(), loadBatches(), loadCod
 .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
 .summary-line { display: flex; justify-content: flex-end; gap: 20px; padding-top: 14px; color: var(--app-text-muted); font-size: 13px; }
 .redemption-admin :deep(.redeemed-row > td) { background: #fff1f0 !important; }.redemption-admin :deep(.archived-row > td) { opacity: 0.68; }
+.mobile-batch-list, .mobile-code-list { display: none; }
 .plaintext-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 18px 0 12px; }
 .lookup-form { display: grid; grid-template-columns: 1fr 110px; gap: 10px; }.lookup-form :deep(.t-input__inner) { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .lookup-result { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin-top: 16px; overflow: hidden; border: 1px solid var(--app-border); border-radius: 7px; background: var(--app-border); }
@@ -309,5 +393,30 @@ onMounted(() => Promise.all([loadSettings(), loadPlans(), loadBatches(), loadCod
   .admin-section { max-width: 100%; padding: 18px 14px; overflow: hidden; }
   .summary-line { justify-content: flex-start; flex-wrap: wrap; gap: 8px 16px; }
   .plaintext-list > div { grid-template-columns: 1fr; gap: 5px; }
+}
+@media (max-width: 720px) {
+  .table-scroll { display: none; }
+  .mobile-batch-list, .mobile-code-list { display: grid; gap: 12px; }
+  .mobile-batch-card, .mobile-code-card { min-width: 0; padding: 15px; background: #fafaf8; border: 1px solid var(--app-border); border-radius: 8px; }
+  .mobile-code-card.redeemed { background: #fff1f0; border-color: #ebc8c5; }
+  .mobile-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .mobile-card-heading > div { min-width: 0; }
+  .mobile-card-heading strong, .mobile-card-heading span { display: block; overflow-wrap: anywhere; }
+  .mobile-card-heading strong { font-size: 14px; }
+  .mobile-card-heading span { margin-top: 4px; color: var(--app-text-muted); font-size: 11px; }
+  .mobile-card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+  .mobile-card-grid span { color: var(--app-text-muted); font-size: 11px; }
+  .mobile-card-grid strong { display: block; margin-top: 4px; overflow-wrap: anywhere; color: var(--app-text); font-size: 13px; }
+  .mobile-card-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+  .mobile-card-actions .t-button { width: 100%; min-height: 44px; }
+  .mobile-code-card dl { display: grid; gap: 8px; margin-top: 14px; }
+  .mobile-code-card dl > div { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 8px; font-size: 12px; }
+  .mobile-code-card dt { color: var(--app-text-muted); }
+  .mobile-code-card dd { min-width: 0; overflow-wrap: anywhere; }
+  .mobile-code-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
+  .mobile-code-actions .t-button { width: 100%; min-height: 44px; }
+  .plaintext-actions { align-items: flex-start; flex-direction: column; }
+  .export-actions { width: 100%; flex-wrap: wrap; }
+  .export-actions .t-button { flex: 1 1 100%; width: 100%; min-height: 44px; }
 }
 </style>

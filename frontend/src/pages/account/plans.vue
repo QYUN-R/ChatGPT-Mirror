@@ -4,7 +4,7 @@
       <div class="section-heading">
         <div>
           <h2>套餐配置</h2>
-            <p>管理套餐名称、宣传语、价格和可购买状态</p>
+            <p>管理套餐号池、用户上限、请求额度、价格和可购买状态</p>
         </div>
         <t-space>
           <t-button variant="outline" @click="openOfferDialog()">新增价格</t-button>
@@ -16,13 +16,24 @@
       </div>
       <t-loading :loading="loading">
         <t-table :data="plans" :columns="planColumns" row-key="id">
+          <template #pools="{ row }">
+            <t-space size="small" break-line>
+              <t-tag v-for="name in row.pool_names" :key="name" size="small" variant="light">{{ name }}</t-tag>
+            </t-space>
+          </template>
           <template #pool_tier="{ row }">{{ row.pool_tier === 'PREMIUM' ? '高级池' : '普通池' }}</template>
           <template #status="{ row }">
             <t-tag :theme="row.is_active && !row.is_archived ? 'success' : 'default'" variant="light">
               {{ row.is_archived ? '已归档' : row.is_active ? '已上架' : '已下架' }}
             </t-tag>
           </template>
-          <template #capacity="{ row }">{{ row.capacity.used }} / {{ row.capacity.total }}</template>
+          <template #capacity="{ row }">
+            <div>{{ row.capacity.used }} / {{ row.capacity.total }}</div>
+            <small>套餐 {{ row.capacity.plan_used }} / {{ row.user_limit || '不限' }}</small>
+          </template>
+          <template #quota="{ row }">
+            {{ quotaLabel(row.daily_quota, '日') }} · {{ quotaLabel(row.monthly_quota, '月') }}
+          </template>
           <template #op="{ row }">
             <t-space size="small">
               <t-link theme="primary" @click="openPlanDialog(row)">编辑</t-link>
@@ -64,18 +75,20 @@
       :visible="planDialog"
       :header="planForm.id ? '编辑套餐' : '新增套餐'"
       :confirm-btn="{ loading: submitting }"
-      width="560px"
+      width="620px"
       @confirm="savePlan"
       @close="planDialog = false"
     >
+      <div class="plan-form-scroll">
       <t-form :data="planForm" label-width="96px">
         <t-form-item label="套餐代码"><t-input v-model="planForm.code" :disabled="Boolean(planForm.id)" /></t-form-item>
         <t-form-item label="套餐名称"><t-input v-model="planForm.name" /></t-form-item>
         <t-form-item label="宣传语"><t-input v-model="planForm.tagline" /></t-form-item>
         <t-form-item label="关联号池">
-          <t-select v-model="planForm.pool_id">
+          <t-select v-model="planForm.pool_ids" multiple filterable placeholder="请选择一个或多个号池">
             <t-option v-for="pool in pools" :key="pool.id" :value="pool.id" :label="pool.car_name" />
           </t-select>
+          <span class="field-tip">系统按容量自动均衡；负载相同时优先使用排在前面的号池</span>
         </t-form-item>
         <t-form-item label="套餐等级">
           <t-radio-group v-model="planForm.pool_tier">
@@ -83,10 +96,25 @@
             <t-radio value="PREMIUM">高级</t-radio>
           </t-radio-group>
         </t-form-item>
+        <div class="limit-grid">
+          <t-form-item label="用户上限">
+            <t-input-number v-model="planForm.user_limit" :min="0" />
+            <span class="field-tip">0 表示只受号池容量限制</span>
+          </t-form-item>
+          <t-form-item label="每日额度">
+            <t-input-number v-model="planForm.daily_quota" :min="0" />
+            <span class="field-tip">0 表示不限请求次数</span>
+          </t-form-item>
+          <t-form-item label="每月额度">
+            <t-input-number v-model="planForm.monthly_quota" :min="0" />
+            <span class="field-tip">0 表示不限请求次数</span>
+          </t-form-item>
+        </div>
         <t-form-item label="公开上架"><t-switch v-model="planForm.is_public" /></t-form-item>
         <t-form-item label="允许使用"><t-switch v-model="planForm.is_active" /></t-form-item>
         <t-form-item label="排序"><t-input-number v-model="planForm.sort_order" :min="0" /></t-form-item>
       </t-form>
+      </div>
     </t-dialog>
 
     <t-dialog
@@ -130,9 +158,10 @@ const offerDialog = ref(false)
 const planColumns = [
   { colKey: 'name', title: '套餐', width: 150 },
   { colKey: 'code', title: '代码', width: 150 },
-  { colKey: 'pool_name', title: '号池' },
+  { colKey: 'pools', title: '关联号池', cell: 'pools', minWidth: 190 },
   { colKey: 'pool_tier', title: '等级', cell: 'pool_tier', width: 90 },
-  { colKey: 'capacity', title: '已用/总席位', cell: 'capacity', width: 120 },
+  { colKey: 'capacity', title: '号池 / 套餐人数', cell: 'capacity', width: 145 },
+  { colKey: 'quota', title: '请求额度', cell: 'quota', width: 150 },
   { colKey: 'status', title: '状态', cell: 'status', width: 100 },
   { colKey: 'op', title: '操作', cell: 'op', width: 130 }
 ]
@@ -153,7 +182,7 @@ const offers = computed(() => plans.value.flatMap(plan => (plan.offers || []).ma
   plan_name: plan.name
 }))))
 
-const planForm = reactive<any>({ id: 0, code: '', name: '', tagline: '', pool_id: null, pool_tier: 'STANDARD', is_active: true, is_public: true, sort_order: 0 })
+const planForm = reactive<any>({ id: 0, code: '', name: '', tagline: '', pool_ids: [], pool_tier: 'STANDARD', user_limit: 0, daily_quota: 0, monthly_quota: 0, is_active: true, is_public: true, sort_order: 0 })
 const offerForm = reactive<any>({ id: 0, plan_id: null, code: 'monthly', name: '月套餐', months: 1, price_yuan: 0, is_draft: false, is_purchase_enabled: true })
 
 const loadData = async () => {
@@ -166,9 +195,10 @@ const loadData = async () => {
 
 const openPlanDialog = (row?: any) => {
   Object.assign(planForm, row ? {
-    id: row.id, code: row.code, name: row.name, tagline: row.tagline, pool_id: row.pool_id,
-    pool_tier: row.pool_tier, is_active: row.is_active, is_public: row.is_public, sort_order: row.sort_order
-  } : { id: 0, code: '', name: '', tagline: '', pool_id: pools.value[0]?.id || null, pool_tier: 'STANDARD', is_active: true, is_public: true, sort_order: 0 })
+    id: row.id, code: row.code, name: row.name, tagline: row.tagline, pool_ids: [...(row.pool_ids || [])],
+    pool_tier: row.pool_tier, user_limit: Number(row.user_limit || 0), daily_quota: Number(row.daily_quota || 0),
+    monthly_quota: Number(row.monthly_quota || 0), is_active: row.is_active, is_public: row.is_public, sort_order: row.sort_order
+  } : { id: 0, code: '', name: '', tagline: '', pool_ids: pools.value[0]?.id ? [pools.value[0].id] : [], pool_tier: 'STANDARD', user_limit: 0, daily_quota: 0, monthly_quota: 0, is_active: true, is_public: true, sort_order: 0 })
   planDialog.value = true
 }
 
@@ -211,6 +241,8 @@ const archive = async (action: string, id: number) => {
   }
 }
 
+const quotaLabel = (value: number, unit: string) => Number(value || 0) > 0 ? `${unit}${value}` : `${unit}不限`
+
 onMounted(loadData)
 </script>
 
@@ -221,5 +253,11 @@ onMounted(loadData)
 .section-heading.compact { margin-bottom: 16px; }
 .section-heading h2 { font-size: 18px; font-weight: 600; }
 .section-heading p { margin-top: 5px; color: var(--app-text-muted); font-size: 13px; }
+.limit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.limit-grid :deep(.t-form__item) { display: block; }
+.field-tip { display: block; margin-top: 5px; color: var(--app-text-muted); font-size: 12px; line-height: 1.4; }
+.plan-form-scroll { max-height: calc(100vh - 220px); overflow-y: auto; padding-right: 6px; }
+.admin-page small { color: var(--app-text-muted); font-size: 11px; }
 @media (max-width: 720px) { .admin-section { padding: 18px 14px; } .section-heading { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 620px) { .limit-grid { grid-template-columns: 1fr; } }
 </style>

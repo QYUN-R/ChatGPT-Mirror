@@ -1,13 +1,18 @@
 <template>
   <div class="layout">
     <t-layout class="layout-shell">
-      <t-aside class="sidebar" width="232px">
+      <t-aside class="sidebar" :class="{ 'sidebar-open': mobileMenuOpen }" width="232px">
         <div class="sidebar-title">
-          <t-icon class="brand-icon" name="dashboard" />
-          <div class="brand-copy">
-            <strong>Chat2</strong>
-            <span>{{ isAdmin ? '管理后台' : '用户中心' }}</span>
+          <div class="brand-lockup">
+            <t-icon class="brand-icon" name="dashboard" />
+            <div class="brand-copy">
+              <strong>Chat2</strong>
+              <span>{{ isAdmin ? '管理后台' : '用户中心' }}</span>
+            </div>
           </div>
+          <t-button class="mobile-close-button" variant="text" shape="square" aria-label="关闭导航" @click="mobileMenuOpen = false">
+            <template #icon><t-icon name="close" /></template>
+          </t-button>
         </div>
         <nav class="navigation" :aria-label="isAdmin ? '管理后台导航' : '用户中心导航'">
           <template v-if="isAdmin">
@@ -40,9 +45,15 @@
           </t-button>
         </div>
       </t-aside>
+      <button v-if="mobileMenuOpen" class="mobile-nav-backdrop" type="button" aria-label="关闭导航" @click="mobileMenuOpen = false" />
       <t-layout class="workspace">
         <t-header class="header">
-          <h1>{{ pageTitle }}</h1>
+          <div class="header-title">
+            <t-button class="mobile-menu-button" variant="text" shape="square" aria-label="打开导航" @click="mobileMenuOpen = true">
+              <template #icon><t-icon name="menu" /></template>
+            </t-button>
+            <h1>{{ pageTitle }}</h1>
+          </div>
           <div class="header-right">
             <t-button v-if="!isAdmin" class="service-entry" variant="outline" @click="enterService">
               <template #icon><t-icon name="play-circle" /></template>
@@ -85,7 +96,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/store/user'
 import request from '@/api/request'
@@ -102,6 +113,7 @@ const pageTitle = computed(() => String(route.meta.title || (isAdmin.value ? '�
 const requiredNotifications = ref<any[]>([])
 const acknowledgingNotification = ref(false)
 const requiredNotification = computed(() => requiredNotifications.value[0] || null)
+const mobileMenuOpen = ref(false)
 
 type NavigationItem = {
   label: string
@@ -165,6 +177,7 @@ const userOptions = [
 ]
 
 const handleMenuChange = (value: string) => {
+  mobileMenuOpen.value = false
   router.push(value)
 }
 
@@ -197,6 +210,7 @@ const handleUserAction = (data: { value: string }) => {
 }
 
 onMounted(loadRequiredNotifications)
+watch(() => route.fullPath, () => { mobileMenuOpen.value = false })
 </script>
 
 <style scoped>
@@ -234,6 +248,19 @@ onMounted(loadRequiredNotifications)
   padding: 0 18px;
   color: var(--app-text);
   border-bottom: 1px solid var(--app-border);
+}
+
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 11px;
+}
+
+.mobile-menu-button,
+.mobile-close-button,
+.mobile-nav-backdrop {
+  display: none;
 }
 
 .brand-icon {
@@ -359,6 +386,13 @@ onMounted(loadRequiredNotifications)
   gap: 10px;
 }
 
+.header-title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
 .service-entry { border-radius: 7px; }
 
 .user-button {
@@ -388,84 +422,95 @@ onMounted(loadRequiredNotifications)
 .required-notice time { display: block; margin-top: 18px; color: var(--app-text-muted); font-size: 12px; }
 
 @media (max-width: 900px) {
+  .layout-shell {
+    display: block;
+  }
+
   .sidebar {
-    width: 76px !important;
-    min-width: 76px;
-    flex: 0 0 76px !important;
-    flex-basis: 76px !important;
+    position: fixed;
+    z-index: 40;
+    width: min(286px, 84vw) !important;
+    min-width: min(286px, 84vw);
+    max-width: 84vw;
+    flex: none !important;
+    transform: translateX(-102%);
+    transition: transform 0.22s ease;
+    box-shadow: 14px 0 42px rgba(25, 25, 23, 0.16);
+  }
+
+  .sidebar.sidebar-open {
+    transform: translateX(0);
   }
 
   .sidebar-title {
-    justify-content: center;
-    padding: 0;
-  }
-
-  .brand-copy,
-  .nav-section-label,
-  .profile-link span {
-    display: none;
+    justify-content: space-between;
+    padding: 0 14px 0 18px;
   }
 
   .navigation {
-    padding: 12px 8px;
-  }
-
-  .nav-section + .nav-section {
-    margin-top: 10px;
+    padding: 14px 10px 10px;
   }
 
   .nav-menu :deep(.t-menu__item) {
-    width: 60px;
-    min-width: 60px;
-    justify-content: center;
-    padding: 0;
-  }
-
-  .sidebar-footer {
-    padding: 8px;
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-start;
+    padding: 0 12px;
   }
 
   .profile-link {
-    justify-content: center;
-    min-width: 60px;
+    justify-content: flex-start;
+    min-width: 0;
+    padding: 0 12px;
+  }
+
+  .mobile-menu-button,
+  .mobile-close-button {
+    display: inline-flex;
+    flex: 0 0 40px;
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
     padding: 0;
   }
 
-  .menu-label {
-    display: none;
+  .mobile-nav-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 35;
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: pointer;
+    background: rgba(25, 25, 23, 0.34);
+    border: 0;
+  }
+
+  .workspace {
+    width: 100%;
   }
 
   .header {
-    padding: 0 20px;
+    height: 60px;
+    padding: 0 14px;
   }
 
   .content {
-    padding: 20px;
+    min-height: calc(100vh - 60px);
+    padding: 18px 14px;
   }
 }
 
 @media (max-width: 560px) {
-  .sidebar {
-    width: 64px !important;
-    min-width: 64px;
-    flex: 0 0 64px !important;
-    flex-basis: 64px !important;
-  }
-
-  .nav-menu :deep(.t-menu__item) {
-    width: 48px;
-    min-width: 48px;
-  }
-
-  .profile-link {
-    min-width: 48px;
-  }
-
   .header {
-    padding: 0 16px;
+    padding: 0 10px;
   }
 
   .header h1 {
+    max-width: 44vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 16px;
   }
 
@@ -480,7 +525,7 @@ onMounted(loadRequiredNotifications)
   }
 
   .content {
-    padding: 16px 12px;
+    padding: 14px 10px;
   }
 }
 </style>

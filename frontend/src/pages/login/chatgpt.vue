@@ -42,11 +42,11 @@
             message="混合模式会同时传入 AccessToken 与 SessionToken，优先建立网页态，同时保留 AccessToken 供接口链路回退。"
           />
         </t-space>
-        <t-space break-line>
+        <div class="account-grid">
           <div
             v-for="item in tableData"
             :key="item.id"
-            style="width: 160px; cursor: pointer"
+            class="account-card"
             :class="{ 'is-disabled': !item.auth_status || !supportsMode(item, selectedMode) }"
             @click="onSelect(item.id)"
           >
@@ -102,7 +102,7 @@
               </t-space>
             </div>
           </div>
-        </t-space>
+        </div>
       </t-loading>
     </t-dialog>
   </div>
@@ -284,6 +284,17 @@ const onSelect = async (chatgptId: number | null) => {
   gap: 6px;
 }
 
+.account-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.account-card {
+  min-width: 0;
+  cursor: pointer;
+}
+
 .is-disabled {
   opacity: 0.5;
   pointer-events: none;
@@ -293,5 +304,11 @@ const onSelect = async (chatgptId: number | null) => {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
   border: none;
+}
+
+@media (max-width: 620px) {
+  .login-chatgpt-card { width: min(100%, 330px); min-width: 0; padding: 20px; }
+  .mode-switch { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .account-grid { grid-template-columns: 1fr; }
 }
 </style>

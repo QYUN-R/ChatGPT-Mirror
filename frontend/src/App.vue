@@ -353,13 +353,22 @@ select {
   }
 
   .t-card__body {
-    padding: 18px;
+    padding: 16px 14px;
   }
 
   .t-dialog {
     width: calc(100vw - 32px) !important;
     max-width: calc(100vw - 32px);
   }
+
+  .t-card__title { font-size: 18px; }
+  .t-card__header { align-items: flex-start; gap: 12px; }
+  .t-card__actions { width: 100%; }
+  .t-card__actions .t-button { width: 100%; min-height: 44px; }
+  .t-form__item { margin-bottom: 20px; }
+  .t-form__label { min-height: 24px; }
+  .t-input, .t-select-input, .t-input-number, .t-date-picker { min-height: 44px; }
+  .t-pagination { flex-wrap: wrap; row-gap: 8px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

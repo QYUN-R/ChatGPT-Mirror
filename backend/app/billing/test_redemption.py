@@ -2,7 +2,9 @@ import base64
 import json
 import threading
 from datetime import timedelta
+from unittest.mock import patch
 
+from django.core.cache import cache
 from django.db import close_old_connections, connection, connections
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
@@ -23,8 +25,11 @@ from app.billing.models import (
     RedemptionCodeStatus,
 )
 from app.billing.redemption import (
+    PUBLIC_REDEMPTION_ERROR,
     archive_redeemed_codes,
     create_redemption_batch,
+    delete_redeemed_codes,
+    normalize_redemption_code,
     redeem_code,
     revoke_redemption_codes,
 )
@@ -122,6 +127,7 @@ class RedemptionTests(TestCase):
 
     def test_generated_plaintext_is_not_stored_and_redeems_once(self):
         _, plaintext, code = self.generate_code()
+        self.assertTrue(plaintext.startswith("TWG-STD-"))
         self.assertNotIn(plaintext, json.dumps(list(RedemptionCode.objects.values()), default=str))
 
         order, subscription, duplicate = self.redeem(plaintext.lower().replace("-", " "))
@@ -137,14 +143,26 @@ class RedemptionTests(TestCase):
         self.assertEqual(code.redeemed_user_agent, "Redemption test browser")
         self.assertEqual(PaymentTransaction.objects.filter(order=order, accepted=True).count(), 1)
 
-        repeated_order, repeated_subscription, duplicate = self.redeem(plaintext)
-        self.assertTrue(duplicate)
-        self.assertEqual(repeated_order.id, order.id)
-        self.assertEqual(repeated_subscription.id, subscription.id)
+        with self.assertRaises(BillingError) as repeated:
+            self.redeem(plaintext)
+        self.assertEqual(repeated.exception.message, PUBLIC_REDEMPTION_ERROR)
         self.assertEqual(PaymentTransaction.objects.filter(order=order).count(), 1)
 
         with self.assertRaises(BillingError):
             self.redeem(plaintext, user=self.other_user)
+
+    def test_prefix_depends_on_plan_tier_not_offer_term(self):
+        _, standard_monthly, _ = self.generate_code(self.standard_offer)
+        _, standard_quarterly, _ = self.generate_code(self.standard_quarterly)
+        _, premium_monthly, _ = self.generate_code(self.premium_offer)
+
+        self.assertTrue(standard_monthly.startswith("TWG-STD-"))
+        self.assertTrue(standard_quarterly.startswith("TWG-STD-"))
+        self.assertTrue(premium_monthly.startswith("TWG-PRO-"))
+
+    def test_legacy_code_format_remains_normalizable(self):
+        legacy = "TWG-" + "-".join(["2345"] * 7)
+        self.assertEqual(normalize_redemption_code(legacy), "TWG" + "2345" * 7)
 
     def test_batch_snapshot_keeps_original_term_and_price(self):
         batch, plaintext, _ = self.generate_code(self.standard_quarterly)
@@ -241,6 +259,50 @@ class RedemptionTests(TestCase):
         self.assertEqual(record.order_id, order.id)
         self.assertEqual(record.redeemed_by_id, self.user.id)
 
+    def test_delete_redeemed_removes_code_but_preserves_entitlement(self):
+        batch, plaintext, record = self.generate_code()
+        order, subscription, _ = self.redeem(plaintext)
+
+        count = delete_redeemed_codes(code_ids=[record.id], actor=self.admin)
+
+        self.assertEqual(count, 1)
+        self.assertFalse(RedemptionCode.objects.filter(pk=record.id).exists())
+        self.assertFalse(type(batch).objects.filter(pk=batch.id).exists())
+        self.assertTrue(Order.objects.filter(pk=order.id).exists())
+        self.assertTrue(type(subscription).objects.filter(pk=subscription.id).exists())
+
+        self.client.force_authenticate(self.user)
+        repeated = self.client.post(
+            "/0x/billing/redemption-codes/redeem",
+            {"code": plaintext},
+            format="json",
+        )
+        self.assertEqual(repeated.status_code, 400)
+        self.assertEqual(repeated.data["message"], PUBLIC_REDEMPTION_ERROR)
+
+    def test_delete_redeemed_accepts_archived_codes_and_updates_batch_quantity(self):
+        batch, plaintext_codes = create_redemption_batch(
+            offer=self.standard_offer,
+            quantity=2,
+            expires_at=None,
+            note="delete redeemed test",
+            actor=self.admin,
+        )
+        self.redeem(plaintext_codes[0]["code"])
+        redeemed = batch.codes.get(status=RedemptionCodeStatus.REDEEMED)
+        archive_redeemed_codes(code_ids=[redeemed.id], actor=self.admin)
+
+        delete_redeemed_codes(code_ids=[redeemed.id], actor=self.admin)
+
+        batch.refresh_from_db()
+        self.assertEqual(batch.quantity, 1)
+        self.assertEqual(batch.codes.count(), 1)
+
+    def test_delete_redeemed_rejects_unused_code(self):
+        _, _, record = self.generate_code()
+        with self.assertRaises(BillingError):
+            delete_redeemed_codes(code_ids=[record.id], actor=self.admin)
+
     def test_user_api_exposes_purchase_url_and_redeems_without_ip_fields(self):
         _, plaintext, _ = self.generate_code()
         self.client.force_authenticate(self.user)
@@ -260,7 +322,7 @@ class RedemptionTests(TestCase):
         self.assertNotIn("redeemed_ip", response.data)
         self.assertNotIn("plaintext_code", response.data)
 
-    def test_admin_api_lists_redeemer_time_and_ip_and_archives_used(self):
+    def test_admin_api_lists_redeemer_time_and_ip_and_deletes_used(self):
         _, plaintext, record = self.generate_code()
         self.redeem(plaintext)
         self.client.force_authenticate(self.admin)
@@ -272,13 +334,14 @@ class RedemptionTests(TestCase):
         self.assertEqual(row["redeemed_ip"], "198.51.100.20")
         self.assertIsNotNone(row["redeemed_at"])
 
-        archived = self.client.post(
+        deleted = self.client.post(
             "/0x/admin/redemption-codes",
-            {"action": "archive_redeemed", "code_ids": [record.id]},
+            {"action": "delete_redeemed", "code_ids": [record.id]},
             format="json",
         )
-        self.assertEqual(archived.status_code, 200)
-        self.assertEqual(archived.data["count"], 1)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.data["count"], 1)
+        self.assertFalse(RedemptionCode.objects.filter(pk=record.id).exists())
 
     def test_admin_batch_list_hides_archived_batches_without_invalid_join(self):
         active_batch, _, _ = self.generate_code()
@@ -292,6 +355,65 @@ class RedemptionTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual([row["id"] for row in response.data["batches"]], [active_batch.id])
+
+        code_list = self.client.get("/0x/admin/redemption-codes")
+        self.assertEqual(code_list.status_code, 200)
+        self.assertEqual(
+            {row["batch_id"] for row in code_list.data["results"]},
+            {active_batch.id},
+        )
+
+    def test_admin_can_generate_expiring_batch(self):
+        self.client.force_authenticate(self.admin)
+        expires_at = timezone.now() + timedelta(days=30)
+        response = self.client.post(
+            "/0x/admin/redemption-batches",
+            {
+                "action": "generate",
+                "offer_id": self.standard_offer.id,
+                "quantity": 2,
+                "expires_at": expires_at.isoformat(),
+                "note": "expiring batch",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["plaintext_codes"]), 2)
+        self.assertTrue(all(item["code"].startswith("TWG-STD-") for item in response.data["plaintext_codes"]))
+
+    def test_user_api_masks_all_redemption_failures(self):
+        _, plaintext, _ = self.generate_code()
+        self.redeem(plaintext)
+        self.client.force_authenticate(self.user)
+        response = self.client.post(
+            "/0x/billing/redemption-codes/redeem",
+            {"code": plaintext},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["message"], PUBLIC_REDEMPTION_ERROR)
+
+    def test_user_api_masks_redemption_rate_limit(self):
+        cache.clear()
+        try:
+            self.client.force_authenticate(self.user)
+            with patch(
+                "app.billing.views.redeem_code",
+                side_effect=BillingError(PUBLIC_REDEMPTION_ERROR),
+            ) as mocked_redeem:
+                responses = [
+                    self.client.post(
+                        "/0x/billing/redemption-codes/redeem",
+                        {"code": "NOT-A-VALID-CODE"},
+                        format="json",
+                    )
+                    for _ in range(6)
+                ]
+            self.assertEqual(mocked_redeem.call_count, 5)
+            self.assertTrue(all(response.status_code == 400 for response in responses))
+            self.assertTrue(all(response.data["message"] == PUBLIC_REDEMPTION_ERROR for response in responses))
+        finally:
+            cache.clear()
 
     def test_admin_can_lookup_full_code_without_returning_plaintext(self):
         _, plaintext, _ = self.generate_code()

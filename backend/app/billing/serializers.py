@@ -46,6 +46,8 @@ class PlanSerializer(serializers.ModelSerializer):
     capacity = serializers.SerializerMethodField()
     purchase_available = serializers.SerializerMethodField()
     pool_name = serializers.CharField(source="pool.car_name", read_only=True)
+    pool_ids = serializers.SerializerMethodField()
+    pool_names = serializers.SerializerMethodField()
 
     class Meta:
         model = Plan
@@ -56,7 +58,12 @@ class PlanSerializer(serializers.ModelSerializer):
             "tagline",
             "pool_id",
             "pool_name",
+            "pool_ids",
+            "pool_names",
             "pool_tier",
+            "user_limit",
+            "daily_quota",
+            "monthly_quota",
             "is_active",
             "is_public",
             "is_archived",
@@ -82,6 +89,14 @@ class PlanSerializer(serializers.ModelSerializer):
 
     def get_capacity(self, obj):
         return capacity_snapshot(obj)
+
+    def get_pool_ids(self, obj):
+        pool_ids = [link.pool_id for link in obj.pool_links.all() if link.is_active]
+        return pool_ids or ([obj.pool_id] if obj.pool_id else [])
+
+    def get_pool_names(self, obj):
+        pool_names = [link.pool.car_name for link in obj.pool_links.all() if link.is_active]
+        return pool_names or ([obj.pool.car_name] if obj.pool_id else [])
 
     def get_purchase_available(self, obj):
         return not capacity_snapshot(obj)["is_full"]

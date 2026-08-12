@@ -22,6 +22,7 @@ from app.billing.models import (
     PaymentTransaction,
     Plan,
     PlanOffer,
+    PlanPool,
     PoolAccountPolicy,
     PoolTier,
     SupportContact,
@@ -232,6 +233,71 @@ class BillingServiceTests(TestCase):
         self.assertIn(migrated.account_id, [item.id for item in self.standard_accounts])
         self.assertNotEqual(migrated.account_id, self.premium_account.id)
         self.assertTrue(AccountAssignmentEvent.objects.filter(event_type="MIGRATED").exists())
+
+    def test_plan_can_allocate_across_multiple_linked_pools(self):
+        second_pool = ChatgptCar.objects.create(
+            car_name="Plus 普通备用号池",
+            gpt_account_list=[],
+            created_time=1,
+            updated_time=1,
+        )
+        second_account = self.create_account("standard-pro@example.com")
+        second_account.plan_type = "pro"
+        second_account.save(update_fields=["plan_type"])
+        self.standard_plan.pool_links.all().delete()
+        PlanPool.objects.create(plan=self.standard_plan, pool=self.standard_pool, priority=0)
+        PlanPool.objects.create(plan=self.standard_plan, pool=second_pool, priority=1)
+        self.standard_pool.billing_policies.update(binding_limit=1)
+        PoolAccountPolicy.objects.create(
+            pool=second_pool,
+            account=second_account,
+            tier=PoolTier.STANDARD,
+            binding_limit=2,
+        )
+
+        first_users = [
+            User.objects.create_user(username=f"multi-pool-first-{index}", password="Strong-password-123!")
+            for index in range(2)
+        ]
+        assignments = []
+        for user in first_users:
+            _, first_subscription = self.purchase(user=user)
+            assignments.append(ensure_assignment(first_subscription))
+        third_user = User.objects.create_user(username="multi-pool-third", password="Strong-password-123!")
+        _, subscription = self.purchase(user=third_user)
+        assignments.append(ensure_assignment(subscription))
+
+        self.assertEqual({item.pool_id for item in assignments}, {self.standard_pool.id, second_pool.id})
+        self.assertIn(second_account.id, {item.account_id for item in assignments})
+
+    def test_plan_user_limit_stops_new_purchase_before_pool_capacity(self):
+        self.standard_plan.user_limit = 1
+        self.standard_plan.save(update_fields=["user_limit", "updated_at"])
+        first_user = User.objects.create_user(username="plan-limit-first", password="Strong-password-123!")
+        second_user = User.objects.create_user(username="plan-limit-second", password="Strong-password-123!")
+        self.purchase(user=first_user)
+
+        with self.assertRaises(CapacityUnavailable):
+            create_order(second_user, self.standard_offer, provider="mock")
+
+    def test_plan_quotas_are_applied_on_purchase_and_upgrade(self):
+        self.standard_plan.daily_quota = 25
+        self.standard_plan.monthly_quota = 500
+        self.standard_plan.save(update_fields=["daily_quota", "monthly_quota", "updated_at"])
+        self.premium_plan.daily_quota = 60
+        self.premium_plan.monthly_quota = 1200
+        self.premium_plan.save(update_fields=["daily_quota", "monthly_quota", "updated_at"])
+
+        self.purchase()
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.daily_quota, 25)
+        self.assertEqual(self.user.monthly_quota, 500)
+
+        upgrade = create_order(self.user, self.premium_offer, provider="mock")
+        complete_order(upgrade, self.payment_event(upgrade))
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.daily_quota, 60)
+        self.assertEqual(self.user.monthly_quota, 1200)
 
     def test_premium_pool_stops_at_its_configured_capacity(self):
         users = [
@@ -560,6 +626,50 @@ class BillingApiTests(TestCase):
         admin_response = self.client.get("/0x/admin/plans")
         self.assertEqual(admin_response.status_code, 200)
         self.assertIn("capacity", admin_response.data["plans"][0])
+
+    def test_admin_can_link_multiple_pools_and_set_plan_limits(self):
+        second_pool = ChatgptCar.objects.create(
+            car_name="API Pro Pool",
+            gpt_account_list=[],
+            created_time=1,
+            updated_time=1,
+        )
+        self.client.force_authenticate(self.user)
+        purchased = self.client.post(
+            "/0x/billing/orders",
+            {"offer_id": self.offer.id, "idempotency_key": "plan-limit-sync", "pay_now": True},
+            format="json",
+        )
+        self.assertEqual(purchased.status_code, 200)
+        self.client.force_authenticate(self.admin)
+        response = self.client.post(
+            "/0x/admin/plans",
+            {
+                "action": "save_plan",
+                "id": self.plan.id,
+                "code": self.plan.code,
+                "name": self.plan.name,
+                "tagline": self.plan.tagline,
+                "pool_ids": [self.pool.id, second_pool.id],
+                "pool_tier": PoolTier.STANDARD,
+                "user_limit": 80,
+                "daily_quota": 30,
+                "monthly_quota": 600,
+                "is_active": True,
+                "is_public": True,
+                "sort_order": 0,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["plan"]["pool_ids"], [self.pool.id, second_pool.id])
+        self.assertEqual(response.data["plan"]["user_limit"], 80)
+        self.assertEqual(response.data["plan"]["daily_quota"], 30)
+        self.assertEqual(response.data["plan"]["monthly_quota"], 600)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.daily_quota, 30)
+        self.assertEqual(self.user.monthly_quota, 600)
 
     def test_support_contacts_are_admin_managed_and_user_visible(self):
         png_data_uri = (

@@ -179,11 +179,12 @@
         <button
           class="free-button"
           type="button"
-          :disabled="loading || !humanVerificationReady"
+          :disabled="loading"
           @click="goFree"
         >
           免费体验
         </button>
+        <p class="free-hint">无需填写邮箱和密码，只需先完成图形验证码</p>
       </template>
     </section>
   </main>
@@ -552,7 +553,11 @@ const onSubmit = async ({ validateResult }: any) => {
 
 const goFree = async () => {
   if (!humanVerificationReady.value) {
-    MessagePlugin.warning('请完成人机验证')
+    MessagePlugin.warning('免费体验只需填写图形验证码')
+    const field = document.getElementById('local-captcha-answer')
+    const input = field?.querySelector<HTMLInputElement>('input') || null
+    field?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    window.setTimeout(() => input?.focus(), 250)
     return
   }
   loading.value = true
@@ -669,6 +674,7 @@ onBeforeUnmount(() => {
 .free-button { width: 100%; height: 50px; padding: 0 16px; color: var(--login-text); font: inherit; font-size: 15px; font-weight: 500; cursor: pointer; background: var(--login-surface); border: 1px solid var(--login-border); border-radius: 8px; }
 .free-button:hover:not(:disabled) { background: #efefec; border-color: var(--login-border-hover); }
 .free-button:disabled { cursor: not-allowed; opacity: 0.5; }
+.free-hint { margin: 8px 0 0; color: var(--login-muted); font-size: 12px; line-height: 1.5; text-align: center; }
 @media (max-width: 520px) { .login-page { align-items: flex-start; padding: 72px 24px 40px; } .login-header { margin-bottom: 28px; } .login-header h1 { font-size: 28px; } .verification-row { grid-template-columns: 1fr; } .verification-button { width: 100%; } .local-captcha-row { grid-template-columns: 1fr; } .local-captcha-image { width: 100%; min-height: 0; } }
 @media (prefers-reduced-motion: reduce) { .login-page *, .login-page *::before, .login-page *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; } }
 </style>

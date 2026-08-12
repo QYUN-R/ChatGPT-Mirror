@@ -1,4 +1,5 @@
 import hashlib
+import logging
 from uuid import uuid4
 
 from django.conf import settings
@@ -24,6 +25,7 @@ from app.billing.serializers import (
     SubscriptionSerializer,
 )
 from app.billing.redemption import redeem_code, redemption_available
+from app.billing.redemption import PUBLIC_REDEMPTION_ERROR
 from app.billing.services import (
     active_subscription,
     audit,
@@ -35,6 +37,9 @@ from app.billing.services import (
 )
 from app.utils import get_client_ip, get_redemption_client_ip
 from app.page import DefaultPageNumberPagination
+
+
+logger = logging.getLogger(__name__)
 
 
 def raise_api_error(error):
@@ -70,7 +75,7 @@ class PlanListView(APIView):
             return Response({"enabled": False, "plans": []})
         checkout_provider = get_checkout_provider()
         commercial = CommercialSettings.objects.filter(pk=1).first()
-        queryset = Plan.objects.select_related("pool").prefetch_related("offers").filter(
+        queryset = Plan.objects.select_related("pool").prefetch_related("offers", "pool_links__pool").filter(
             is_active=True,
             is_public=True,
             is_archived=False,
@@ -89,10 +94,13 @@ class RedemptionCodeRedeemView(APIView):
     permission_classes = (IsAuthenticated,)
     throttle_classes = (RedemptionUserRateThrottle, RedemptionIpRateThrottle)
 
+    def throttled(self, request, wait):
+        raise ValidationError({"message": PUBLIC_REDEMPTION_ERROR, "code": "redemption_code_invalid"})
+
     def post(self, request):
         plaintext_code = str(request.data.get("code") or "")
         if len(plaintext_code) > 128:
-            raise ValidationError({"message": "卡密无效或已使用", "code": "redemption_code_invalid"})
+            raise ValidationError({"message": PUBLIC_REDEMPTION_ERROR, "code": "redemption_code_invalid"})
         try:
             order, subscription, already_redeemed = redeem_code(
                 user=request.user,
@@ -105,8 +113,11 @@ class RedemptionCodeRedeemView(APIView):
                 "subscription": SubscriptionSerializer(subscription).data,
                 "already_redeemed": already_redeemed,
             })
-        except BillingError as exc:
-            raise_api_error(exc)
+        except BillingError:
+            raise ValidationError({"message": PUBLIC_REDEMPTION_ERROR, "code": "redemption_code_invalid"})
+        except Exception:
+            logger.exception("Redemption processing failed for user_id=%s", request.user.pk)
+            raise ValidationError({"message": PUBLIC_REDEMPTION_ERROR, "code": "redemption_code_invalid"})
 
 
 class BillingMeView(APIView):

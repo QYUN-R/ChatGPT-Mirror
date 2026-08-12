@@ -17,8 +17,8 @@ from django.utils import timezone
 from app.billing.exceptions import BillingError
 from app.billing.models import (
     CommercialSettings,
-    OrderStatus,
     PlanOffer,
+    PoolTier,
     RedemptionCode,
     RedemptionCodeBatch,
     RedemptionCodeStatus,
@@ -29,7 +29,20 @@ from app.billing.services import audit, complete_order, create_order
 
 CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 CODE_PAYLOAD_LENGTH = 28
-CODE_PATTERN = re.compile(rf"^TWG[{CODE_ALPHABET}]{{{CODE_PAYLOAD_LENGTH}}}$")
+LEGACY_CODE_PAYLOAD_LENGTH = 28
+PUBLIC_REDEMPTION_ERROR = "该兑换码无效或不可使用"
+NORMALIZED_PREFIX_BY_TIER = {
+    PoolTier.STANDARD: "TWGSTD",
+    PoolTier.PREMIUM: "TWGPRO",
+}
+DISPLAY_PREFIX_BY_TIER = {
+    PoolTier.STANDARD: "TWG-STD",
+    PoolTier.PREMIUM: "TWG-PRO",
+}
+CODE_PATTERN = re.compile(
+    rf"^(?:TWG(?:STD|PRO)[{CODE_ALPHABET}]{{{CODE_PAYLOAD_LENGTH}}}|"
+    rf"TWG[{CODE_ALPHABET}]{{{LEGACY_CODE_PAYLOAD_LENGTH}}})$"
+)
 
 
 def redemption_available():
@@ -42,13 +55,27 @@ def redemption_available():
 def normalize_redemption_code(value):
     normalized = re.sub(r"[-\s]", "", str(value or "")).upper()
     if not CODE_PATTERN.fullmatch(normalized):
-        raise BillingError("卡密无效或已使用", code="redemption_code_invalid")
+        raise BillingError(PUBLIC_REDEMPTION_ERROR, code="redemption_code_invalid")
     return normalized
 
 
 def format_redemption_code(normalized):
-    payload = normalized[3:]
-    return "TWG-" + "-".join(payload[index:index + 4] for index in range(0, len(payload), 4))
+    if normalized.startswith("TWGSTD"):
+        prefix, payload = DISPLAY_PREFIX_BY_TIER[PoolTier.STANDARD], normalized[6:]
+    elif normalized.startswith("TWGPRO"):
+        prefix, payload = DISPLAY_PREFIX_BY_TIER[PoolTier.PREMIUM], normalized[6:]
+    else:
+        prefix, payload = "TWG", normalized[3:]
+    return prefix + "-" + "-".join(payload[index:index + 4] for index in range(0, len(payload), 4))
+
+
+def mask_redemption_code(normalized):
+    formatted = format_redemption_code(normalized)
+    parts = formatted.split("-")
+    prefix_parts = 2 if len(parts) > 2 and parts[1] in {"STD", "PRO"} else 1
+    payload_groups = parts[prefix_parts:]
+    masked_groups = ["****"] * max(len(payload_groups) - 1, 0) + [payload_groups[-1]]
+    return "-".join(parts[:prefix_parts] + masked_groups)
 
 
 def _decode_key(value):
@@ -85,8 +112,13 @@ def redemption_digest(normalized, key):
     return hmac.new(key, normalized.encode("ascii"), hashlib.sha256).hexdigest()
 
 
-def generate_plaintext_code():
-    normalized = "TWG" + "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_PAYLOAD_LENGTH))
+def generate_plaintext_code(pool_tier):
+    normalized_prefix = NORMALIZED_PREFIX_BY_TIER.get(pool_tier)
+    if not normalized_prefix:
+        raise BillingError("套餐等级不支持生成卡密", code="redemption_tier_invalid")
+    normalized = normalized_prefix + "".join(
+        secrets.choice(CODE_ALPHABET) for _ in range(CODE_PAYLOAD_LENGTH)
+    )
     return normalized, format_redemption_code(normalized)
 
 
@@ -142,7 +174,7 @@ def create_redemption_batch(*, offer, quantity, expires_at, note, actor, ip_addr
     records = []
     plaintext_codes = []
     for index in range(1, quantity + 1):
-        normalized, plaintext = generate_plaintext_code()
+        normalized, plaintext = generate_plaintext_code(offer.plan.pool_tier)
         serial_no = f"{batch.batch_no}-{index:04d}"
         records.append(
             RedemptionCode(
@@ -150,7 +182,7 @@ def create_redemption_batch(*, offer, quantity, expires_at, note, actor, ip_addr
                 serial_no=serial_no,
                 key_version=active_version,
                 code_digest=redemption_digest(normalized, keys[active_version]),
-                code_mask=f"TWG-****-****-****-****-****-****-{normalized[-4:]}",
+                code_mask=mask_redemption_code(normalized),
             )
         )
         plaintext_codes.append({"serial_no": serial_no, "code": plaintext})
@@ -186,7 +218,7 @@ def assert_redemption_not_locked(user, ip_address):
     for kind, digest in _failure_subjects(user, ip_address):
         if cache.get(f"redemption:lock:{kind}:{digest}"):
             raise BillingError(
-                "卡密尝试次数过多，请稍后再试",
+                PUBLIC_REDEMPTION_ERROR,
                 code="redemption_temporarily_locked",
             )
 
@@ -216,7 +248,7 @@ def clear_redemption_failures(user, ip_address):
 
 def _invalid_code(user, ip_address):
     record_redemption_failure(user, ip_address)
-    raise BillingError("卡密无效或已使用", code="redemption_code_invalid")
+    raise BillingError(PUBLIC_REDEMPTION_ERROR, code="redemption_code_invalid")
 
 
 def _find_code_for_update(normalized, keys):
@@ -338,6 +370,58 @@ def archive_redeemed_codes(*, code_ids, actor, ip_address=None):
 
 
 @transaction.atomic
+def delete_redeemed_codes(*, code_ids, actor, ip_address=None):
+    code_ids = _validated_code_ids(code_ids)
+    codes = list(
+        RedemptionCode.objects.select_for_update()
+        .select_related("batch")
+        .filter(pk__in=code_ids)
+    )
+    if len(codes) != len(code_ids) or any(
+        code.status != RedemptionCodeStatus.REDEEMED for code in codes
+    ):
+        raise BillingError("只能删除已使用的卡密记录", code="redemption_delete_not_allowed")
+
+    batch_ids = sorted({code.batch_id for code in codes})
+    batches = {
+        batch.pk: batch
+        for batch in RedemptionCodeBatch.objects.select_for_update().filter(pk__in=batch_ids)
+    }
+    serial_numbers = [code.serial_no for code in codes]
+    order_ids = [code.order_id for code in codes if code.order_id]
+    subscription_ids = [code.subscription_id for code in codes if code.subscription_id]
+    batch_numbers = sorted({code.batch.batch_no for code in codes})
+
+    RedemptionCode.objects.filter(pk__in=code_ids).delete()
+    deleted_batch_numbers = []
+    for batch_id, batch in batches.items():
+        remaining = RedemptionCode.objects.filter(batch_id=batch_id).count()
+        if remaining == 0:
+            deleted_batch_numbers.append(batch.batch_no)
+            batch.delete()
+        elif batch.quantity != remaining:
+            batch.quantity = remaining
+            batch.save(update_fields=["quantity", "updated_at"])
+
+    audit(
+        "redemption.codes_deleted",
+        actor=actor,
+        ip_address=ip_address,
+        target_type="RedemptionCode",
+        target_id=",".join(str(code_id) for code_id in code_ids[:20]),
+        detail={
+            "count": len(codes),
+            "serial_numbers": serial_numbers[:100],
+            "batch_numbers": batch_numbers[:100],
+            "deleted_batch_numbers": deleted_batch_numbers[:100],
+            "preserved_order_ids": order_ids[:100],
+            "preserved_subscription_ids": subscription_ids[:100],
+        },
+    )
+    return len(codes)
+
+
+@transaction.atomic
 def restore_archived_codes(*, code_ids, actor, ip_address=None):
     code_ids = _validated_code_ids(code_ids)
     codes = list(RedemptionCode.objects.select_for_update().filter(pk__in=code_ids))
@@ -385,9 +469,6 @@ def redeem_code(*, user, plaintext_code, ip_address, user_agent):
     code.batch = batch
 
     if code.status == RedemptionCodeStatus.REDEEMED:
-        if code.redeemed_by_id == user.id and code.order_id and code.order.status == OrderStatus.PAID:
-            clear_redemption_failures(user, ip_address)
-            return code.order, code.subscription, True
         _invalid_code(user, ip_address)
 
     now = timezone.now()

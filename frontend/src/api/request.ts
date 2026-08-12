@@ -93,14 +93,10 @@ const request = async (url: string, method = 'GET', body?: any) => {
       return null
     }
 
-    if (response.status === 500) {
-      MessagePlugin.error('系统异常')
-      return null
-    }
-
     if (!response.ok) {
       const error = data || { message: `请求失败 (${response.status})` }
-      MessagePlugin.error(extractErrorMessage(error))
+      const message = extractErrorMessage(error)
+      MessagePlugin.error(response.status >= 500 && message === '请求失败' ? '系统异常，请稍后重试' : message)
       return null
     }
 

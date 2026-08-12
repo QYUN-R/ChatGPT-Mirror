@@ -9,10 +9,11 @@
           </t-tag>
         </div>
         <div class="capacity-values">
-          <div><span>总席位</span><strong>{{ plan.capacity.total }}</strong></div>
-          <div><span>已使用</span><strong>{{ plan.capacity.used }}</strong></div>
-          <div><span>可用</span><strong>{{ plan.capacity.available }}</strong></div>
+          <div><span>号池席位</span><strong>{{ plan.capacity.used }} / {{ plan.capacity.total }}</strong></div>
+          <div><span>套餐人数</span><strong>{{ plan.capacity.plan_used }} / {{ plan.user_limit || '不限' }}</strong></div>
+          <div><span>可新增</span><strong>{{ plan.capacity.available }}</strong></div>
         </div>
+        <div class="pool-list">{{ (plan.pool_names || []).join(' · ') }}</div>
       </div>
     </section>
 
@@ -20,7 +21,7 @@
       <div class="section-heading">
         <div>
           <h2>账号策略</h2>
-          <p>账号只能加入一个商业号池，每个账号的绑定上限由管理员独立设置</p>
+          <p>账号只能加入一个商业号池；Plus、Pro、Team、Business 均可配置，每个账号独立设置承载人数</p>
         </div>
         <t-button theme="primary" @click="openDialog()">
           <template #icon><t-icon name="add" /></template>
@@ -179,6 +180,7 @@ onMounted(loadData)
 .capacity-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 20px; }
 .capacity-values span { display: block; color: var(--app-text-muted); font-size: 12px; }
 .capacity-values strong { display: block; margin-top: 7px; font-size: 24px; font-weight: 600; }
+.pool-list { margin-top: 14px; color: var(--app-text-muted); font-size: 12px; }
 .admin-section { padding: 22px 24px; background: var(--app-surface); border: 1px solid var(--app-border); border-radius: 8px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .section-heading h2 { font-size: 18px; font-weight: 600; }

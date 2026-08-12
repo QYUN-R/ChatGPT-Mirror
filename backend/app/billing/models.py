@@ -11,6 +11,14 @@ from django.utils import timezone
 from app.chatgpt.models import ChatgptAccount, ChatgptCar
 
 
+COMMERCIAL_ACCOUNT_PLAN_MARKERS = ("plus", "pro", "team", "business")
+
+
+def supports_commercial_pool_account(account):
+    plan_type = (account.plan_type or "").strip().lower()
+    return any(marker in plan_type for marker in COMMERCIAL_ACCOUNT_PLAN_MARKERS)
+
+
 class PoolTier(models.TextChoices):
     STANDARD = "STANDARD", "普通 Plus 池"
     PREMIUM = "PREMIUM", "高级 Plus 池"
@@ -90,6 +98,14 @@ class Plan(TimestampedModel):
         related_name="billing_plans",
     )
     pool_tier = models.CharField(max_length=16, choices=PoolTier.choices)
+    pools = models.ManyToManyField(
+        ChatgptCar,
+        through="PlanPool",
+        related_name="billing_pool_plans",
+    )
+    user_limit = models.PositiveIntegerField(default=0)
+    daily_quota = models.PositiveIntegerField(default=0)
+    monthly_quota = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
     is_public = models.BooleanField(default=True)
     is_archived = models.BooleanField(default=False)
@@ -109,6 +125,16 @@ class Plan(TimestampedModel):
             )
             if conflicting_plans.exists() or conflicting_policies.exists():
                 errors["pool_tier"] = "同一个商业号池只能属于一个套餐等级"
+        if self.pk and self.pool_tier:
+            linked_pool_ids = self.pool_links.filter(is_active=True).values_list("pool_id", flat=True)
+            if PoolAccountPolicy.objects.filter(pool_id__in=linked_pool_ids).exclude(
+                tier=self.pool_tier
+            ).exists():
+                errors["pool_tier"] = "套餐等级必须与所有关联号池一致"
+            if PlanPool.objects.filter(pool_id__in=linked_pool_ids, is_active=True).exclude(
+                plan=self
+            ).exclude(plan__pool_tier=self.pool_tier).exists():
+                errors["pool_tier"] = "关联号池已被其他套餐等级使用"
         if errors:
             raise ValidationError(errors)
 
@@ -118,6 +144,37 @@ class Plan(TimestampedModel):
 
     def __str__(self):
         return self.name
+
+
+class PlanPool(TimestampedModel):
+    plan = models.ForeignKey(Plan, on_delete=models.CASCADE, related_name="pool_links")
+    pool = models.ForeignKey(ChatgptCar, on_delete=models.PROTECT, related_name="billing_plan_links")
+    priority = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ("priority", "id")
+        constraints = [
+            models.UniqueConstraint(fields=("plan", "pool"), name="billing_plan_pool_uniq"),
+        ]
+
+    def clean(self):
+        errors = {}
+        if self.plan_id and self.pool_id and self.is_active:
+            conflicting_policies = PoolAccountPolicy.objects.filter(pool_id=self.pool_id).exclude(
+                tier=self.plan.pool_tier
+            )
+            conflicting_plans = PlanPool.objects.filter(pool_id=self.pool_id, is_active=True).exclude(
+                pk=self.pk
+            ).exclude(plan__pool_tier=self.plan.pool_tier)
+            if conflicting_policies.exists() or conflicting_plans.exists():
+                errors["pool"] = "同一个商业号池只能关联同一套餐等级"
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
 
 
 class PlanOffer(TimestampedModel):
@@ -447,14 +504,18 @@ class PoolAccountPolicy(TimestampedModel):
         errors = {}
         if self.binding_limit < 1:
             errors["binding_limit"] = "单账号绑定上限必须至少为 1"
-        if self.account_id and "plus" not in (self.account.plan_type or "").lower():
-            errors["account"] = "商业号池只允许加入 Plus 账号"
+        if self.account_id and not supports_commercial_pool_account(self.account):
+            errors["account"] = "商业号池只允许加入 Plus、Pro、Team 或 Business 账号"
         if self.pool_id and self.tier:
             conflicting_policies = PoolAccountPolicy.objects.filter(pool_id=self.pool_id).exclude(
                 pk=self.pk
             ).exclude(tier=self.tier)
             conflicting_plans = Plan.objects.filter(pool_id=self.pool_id).exclude(pool_tier=self.tier)
-            if conflicting_policies.exists() or conflicting_plans.exists():
+            conflicting_plan_links = PlanPool.objects.filter(
+                pool_id=self.pool_id,
+                is_active=True,
+            ).exclude(plan__pool_tier=self.tier)
+            if conflicting_policies.exists() or conflicting_plans.exists() or conflicting_plan_links.exists():
                 errors["tier"] = "普通池和高级池不能共用同一个号池"
         if errors:
             raise ValidationError(errors)

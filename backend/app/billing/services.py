@@ -21,6 +21,7 @@ from app.billing.models import (
     OrderStatus,
     OrderType,
     PaymentTransaction,
+    Plan,
     PlanOffer,
     PoolAccountPolicy,
     PoolReservation,
@@ -31,6 +32,7 @@ from app.billing.models import (
     UsageEvent,
     UsageResult,
     UserNotification,
+    supports_commercial_pool_account,
 )
 from app.billing.payment import (
     ALIPAY_CLOSED_STATUSES,
@@ -38,7 +40,7 @@ from app.billing.payment import (
     PaymentEvent,
     get_payment_provider,
 )
-from app.billing.selectors import CAPACITY_STATUSES, capacity_snapshot
+from app.billing.selectors import CAPACITY_STATUSES, capacity_snapshot, plan_pool_ids, pool_capacity_snapshots
 from app.chatgpt.models import ChatgptAccount
 
 
@@ -128,6 +130,17 @@ def _sync_legacy_expiry(subscription):
     user.save(update_fields=["expired_date"])
 
 
+def _sync_plan_quotas(subscription):
+    user = subscription.user
+    daily_quota = max(int(subscription.plan.daily_quota or 0), 0)
+    monthly_quota = max(int(subscription.plan.monthly_quota or 0), 0)
+    if user.daily_quota == daily_quota and user.monthly_quota == monthly_quota:
+        return
+    user.daily_quota = daily_quota
+    user.monthly_quota = monthly_quota
+    user.save(update_fields=["daily_quota", "monthly_quota"])
+
+
 def _release_assignment(subscription, reason):
     assignment = AccountAssignment.objects.select_for_update().filter(
         subscription=subscription,
@@ -198,6 +211,7 @@ def refresh_subscription_state(user):
             _release_reservations(subscription)
         subscription.save()
         _sync_legacy_expiry(subscription)
+        _sync_plan_quotas(subscription)
         audit(
             "subscription.downgrade_applied",
             subscription,
@@ -231,6 +245,7 @@ def active_subscription(user):
 
 def _reserve_capacity(*, user, plan, order, subscription=None):
     now = timezone.now()
+    plan = Plan.objects.select_for_update().get(pk=plan.pk)
     PoolReservation.objects.select_for_update().filter(
         status=ReservationStatus.HELD,
         expires_at__lte=now,
@@ -241,11 +256,22 @@ def _reserve_capacity(*, user, plan, order, subscription=None):
     )
     snapshot = capacity_snapshot(plan, lock=True)
     if snapshot["available"] < 1:
-        raise CapacityUnavailable(f"{plan.name}号池已满，请联系管理员增加 Plus 账号")
+        raise CapacityUnavailable(f"{plan.name}号池已满，请联系管理员增加上游账号")
+    available_pools = [item for item in snapshot["pools"] if item["available"] > 0]
+    if not available_pools:
+        raise CapacityUnavailable(f"{plan.name}号池已满，请联系管理员增加上游账号")
+    selected_pool = min(
+        available_pools,
+        key=lambda item: (
+            item["used"] / item["total"] if item["total"] else 1,
+            item["used"],
+            item["pool_id"],
+        ),
+    )
     return PoolReservation.objects.create(
         user=user,
         plan=plan,
-        pool=plan.pool,
+        pool_id=selected_pool["pool_id"],
         order=order,
         subscription=subscription,
         status=ReservationStatus.HELD,
@@ -470,6 +496,8 @@ def _apply_paid_order(order):
         raise PaymentRejected("不支持的订单类型")
 
     _sync_legacy_expiry(subscription)
+    if order.order_type != OrderType.DOWNGRADE:
+        _sync_plan_quotas(subscription)
     return subscription
 
 
@@ -741,7 +769,7 @@ def _policy_is_usable(policy):
         and not account.is_archived
         and account.auth_status
         and (account.access_token_valid or account.session_token_valid)
-        and "plus" in (account.plan_type or "").lower()
+        and supports_commercial_pool_account(account)
     )
 
 
@@ -751,17 +779,18 @@ def ensure_assignment(subscription, *, reason="first_use", force=False):
         "user",
         "plan",
         "plan__pool",
-    ).get(pk=subscription.pk)
+    ).prefetch_related("plan__pool_links__pool").get(pk=subscription.pk)
     if not subscription.is_service_active:
         raise SubscriptionInactive("套餐已到期或暂停，请续费后再使用")
 
     assignment = AccountAssignment.objects.select_for_update().select_related("account").filter(
         subscription=subscription,
     ).first()
+    linked_pool_ids = plan_pool_ids(subscription.plan)
     if assignment and assignment.active and not force:
         policy = PoolAccountPolicy.objects.select_related("account").filter(
             account=assignment.account,
-            pool=subscription.plan.pool,
+            pool_id__in=linked_pool_ids,
             tier=subscription.plan.pool_tier,
         ).first()
         if policy and _policy_is_usable(policy):
@@ -771,7 +800,7 @@ def ensure_assignment(subscription, *, reason="first_use", force=False):
         PoolAccountPolicy.objects.select_for_update()
         .select_related("account")
         .filter(
-            pool=subscription.plan.pool,
+            pool_id__in=linked_pool_ids,
             tier=subscription.plan.pool_tier,
             enabled=True,
             account__is_archived=False,
@@ -795,6 +824,12 @@ def ensure_assignment(subscription, *, reason="first_use", force=False):
         .values("account_id")
         .annotate(total=Count("id"))
     }
+    reservation = PoolReservation.objects.select_for_update().filter(
+        subscription=subscription,
+        plan=subscription.plan,
+        status__in=(ReservationStatus.ACTIVE, ReservationStatus.ASSIGNED),
+    ).order_by("-created_at").first()
+    reserved_pool_id = reservation.pool_id if reservation else None
     candidates = [
         policy
         for policy in policies
@@ -802,19 +837,22 @@ def ensure_assignment(subscription, *, reason="first_use", force=False):
         and not (force and assignment and policy.account_id == assignment.account_id)
     ]
     if not candidates:
-        raise CapacityUnavailable("当前套餐号池没有可分配的健康 Plus 账号")
+        raise CapacityUnavailable("当前套餐号池没有可分配的健康上游账号")
+    pool_priorities = {pool_id: index for index, pool_id in enumerate(linked_pool_ids)}
     selected = min(
         candidates,
         key=lambda policy: (
+            0 if reserved_pool_id and policy.pool_id == reserved_pool_id else 1,
             binding_counts.get(policy.account_id, 0) / policy.binding_limit,
             recent_counts.get(policy.account_id, 0),
+            pool_priorities.get(policy.pool_id, len(pool_priorities)),
             policy.account_id,
         ),
     )
     old_account = assignment.account if assignment else None
     now = timezone.now()
     if assignment:
-        assignment.pool = subscription.plan.pool
+        assignment.pool = selected.pool
         assignment.account = selected.account
         assignment.active = True
         assignment.assigned_at = now
@@ -825,7 +863,7 @@ def ensure_assignment(subscription, *, reason="first_use", force=False):
         assignment = AccountAssignment.objects.create(
             subscription=subscription,
             user=subscription.user,
-            pool=subscription.plan.pool,
+            pool=selected.pool,
             account=selected.account,
             active=True,
             assigned_at=now,
@@ -840,15 +878,38 @@ def ensure_assignment(subscription, *, reason="first_use", force=False):
         event_type=event_type,
         reason=reason,
     )
-    PoolReservation.objects.filter(
+    reservation_queryset = PoolReservation.objects.filter(
         subscription=subscription,
         plan=subscription.plan,
-        status=ReservationStatus.ACTIVE,
-    ).update(status=ReservationStatus.ASSIGNED, updated_at=now)
+        status__in=(ReservationStatus.ACTIVE, ReservationStatus.ASSIGNED),
+    )
+    matching_reservation = reservation_queryset.filter(pool=selected.pool).first()
+    if matching_reservation:
+        reservation_queryset.exclude(pk=matching_reservation.pk).update(
+            status=ReservationStatus.RELEASED,
+            released_at=now,
+            updated_at=now,
+        )
+        matching_reservation.status = ReservationStatus.ASSIGNED
+        matching_reservation.released_at = None
+        matching_reservation.save(update_fields=["status", "released_at", "updated_at"])
+    else:
+        reservation_queryset.update(
+            status=ReservationStatus.RELEASED,
+            released_at=now,
+            updated_at=now,
+        )
+        PoolReservation.objects.create(
+            user=subscription.user,
+            plan=subscription.plan,
+            pool=selected.pool,
+            subscription=subscription,
+            status=ReservationStatus.ASSIGNED,
+        )
     audit(
         "assignment.created" if not old_account else "assignment.migrated",
         assignment,
-        detail={"reason": reason, "pool_id": subscription.plan.pool_id},
+        detail={"reason": reason, "pool_id": selected.pool_id},
     )
     return assignment
 

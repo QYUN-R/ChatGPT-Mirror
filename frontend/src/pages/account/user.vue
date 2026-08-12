@@ -18,15 +18,16 @@
         <t-button variant="outline" :disabled="!selectedRowKeys.length" @click="batchAction('deactivate')">批量禁用</t-button>
       </div>
 
-      <t-table
-        :data="tableData"
-        :columns="columns"
-        :loading="loading"
-        :pagination="pagination"
-        @page-change="onPageChange"
-        row-key="id"
-        v-model:selected-row-keys="selectedRowKeys"
-      >
+      <div class="desktop-user-table">
+        <t-table
+          :data="tableData"
+          :columns="columns"
+          :loading="loading"
+          :pagination="pagination"
+          @page-change="onPageChange"
+          row-key="id"
+          v-model:selected-row-keys="selectedRowKeys"
+        >
         <template #is_active="{ row }">
           <t-tag :theme="row.is_active ? 'success' : 'danger'">
             {{ row.is_active ? '启用' : '禁用' }}
@@ -74,7 +75,45 @@
             </t-popconfirm>
           </t-space>
         </template>
-      </t-table>
+        </t-table>
+      </div>
+
+      <div class="mobile-user-list">
+        <article v-for="row in tableData" :key="row.id" class="mobile-user-card">
+          <div class="mobile-user-heading">
+            <div>
+              <strong>{{ row.username }}</strong>
+              <span>ID {{ row.id }}</span>
+            </div>
+            <t-tag :theme="row.is_active ? 'success' : 'danger'" variant="light">
+              {{ row.is_active ? '启用' : '禁用' }}
+            </t-tag>
+          </div>
+          <dl>
+            <div><dt>邮箱</dt><dd>{{ row.email || '未绑定' }}<span v-if="row.email"> · {{ row.email_verified ? '已验证' : '待验证' }}</span></dd></div>
+            <div><dt>套餐</dt><dd>{{ row.subscription?.plan_name || '未开通' }}</dd></div>
+            <div><dt>过期</dt><dd>{{ row.expired_date || '永久' }}</dd></div>
+            <div><dt>备注</dt><dd>{{ row.remark || '-' }}</dd></div>
+          </dl>
+          <div class="mobile-user-actions">
+            <t-button variant="outline" @click="showEditDialog(row)">编辑</t-button>
+            <t-popconfirm content="确定删除该用户吗？" @confirm="handleDelete(row)">
+              <t-button theme="danger" variant="outline">删除</t-button>
+            </t-popconfirm>
+          </div>
+        </article>
+        <div v-if="!loading && !tableData.length" class="mobile-empty">暂无用户</div>
+        <t-pagination
+          v-if="pagination.total > pagination.pageSize"
+          class="mobile-pagination"
+          :current="pagination.current"
+          :page-size="pagination.pageSize"
+          :total="pagination.total"
+          :show-page-number="false"
+          :show-page-size="false"
+          @change="onPageChange"
+        />
+      </div>
     </t-card>
 
     <!-- 添加/编辑对话框 -->
@@ -383,5 +422,25 @@ const batchAction = async (action: 'activate' | 'deactivate') => {
   grid-template-columns: minmax(220px, 1fr) 160px auto auto auto;
   gap: 10px;
   margin-bottom: 16px;
+}
+.mobile-user-list { display: none; }
+@media (max-width: 760px) {
+  .desktop-user-table { display: none; }
+  .mobile-user-list { display: grid; gap: 12px; }
+  .table-toolbar { grid-template-columns: 1fr; }
+  .table-toolbar > .t-button { width: 100%; }
+  .mobile-user-card { padding: 16px; background: #fafaf8; border: 1px solid var(--app-border); border-radius: 8px; }
+  .mobile-user-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .mobile-user-heading strong, .mobile-user-heading span { display: block; }
+  .mobile-user-heading strong { overflow-wrap: anywhere; font-size: 16px; }
+  .mobile-user-heading span { margin-top: 3px; color: var(--app-text-muted); font-size: 12px; }
+  .mobile-user-card dl { display: grid; gap: 9px; margin-top: 14px; }
+  .mobile-user-card dl > div { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 8px; font-size: 13px; }
+  .mobile-user-card dt { color: var(--app-text-muted); }
+  .mobile-user-card dd { min-width: 0; overflow-wrap: anywhere; }
+  .mobile-user-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 16px; }
+  .mobile-user-actions .t-button { width: 100%; min-height: 44px; }
+  .mobile-empty { padding: 28px 12px; color: var(--app-text-muted); text-align: center; }
+  .mobile-pagination { justify-content: center; padding-top: 4px; }
 }
 </style>
