@@ -822,6 +822,35 @@ class EmailAuthenticationTests(TestCase):
             ).exists()
         )
 
+    def test_admin_can_update_user_with_expiration_date(self):
+        admin = User.objects.create_superuser(username="expiry-admin", password="Strong-password-123!")
+        user = User.objects.create_user(username="expiry-edit-user", password="Strong-password-123!")
+        expires_on = timezone.localdate() + timedelta(days=30)
+        request = self.factory.post(
+            "/0x/user/",
+            {
+                "username": user.username,
+                "email": "",
+                "is_active": True,
+                "isolated_session": True,
+                "gptcar_list": [1, 2, 3],
+                "model_limit": [],
+                "remark": "",
+                "expired_date": expires_on.isoformat(),
+                "daily_quota": 1000,
+                "monthly_quota": 1999,
+            },
+            format="json",
+        )
+        force_authenticate(request, user=admin)
+
+        response = UserAccountView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        user.refresh_from_db()
+        self.assertEqual(user.expired_date, expires_on)
+        self.assertEqual(user.gptcar_list, [1, 2, 3])
+
     def test_email_like_legacy_username_stops_working_after_email_binding(self):
         from app.accounts.views.login import _find_login_user
 

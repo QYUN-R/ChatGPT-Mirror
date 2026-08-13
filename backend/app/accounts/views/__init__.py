@@ -284,8 +284,8 @@ class UserAccountView(generics.ListCreateAPIView):
             user.email = requested_email
             user.email_verified_at = None
 
-        if "expired_date" in serializer.data.keys():
-            user.expired_date = serializer.data["expired_date"]
+        if "expired_date" in serializer.validated_data:
+            user.expired_date = serializer.validated_data["expired_date"]
 
         user.gptcar_list = serializer.data["gptcar_list"]
         user.is_active = serializer.data["is_active"]
