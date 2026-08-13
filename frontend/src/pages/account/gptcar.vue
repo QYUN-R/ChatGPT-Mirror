@@ -1,6 +1,6 @@
 <template>
   <div>
-    <t-card title="账号池" subtitle="将上游账号按使用场景组织为不同账号池" :bordered="false">
+    <t-card title="免费账号池" subtitle="仅维护 Free 或非商业账号；Plus、Pro、Team、Business 请在套餐号池中管理" :bordered="false">
       <template #actions>
         <t-button theme="primary" @click="showAddDialog">
           <template #icon><local-icon name="add" /></template>

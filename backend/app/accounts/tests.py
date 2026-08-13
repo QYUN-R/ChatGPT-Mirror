@@ -416,8 +416,10 @@ class SecurityRegressionTests(TestCase):
 
     @patch("app.chatgpt.views.chatgpt.req_gateway")
     @patch("app.chatgpt.views.chatgpt.resolve_managed_account")
+    @patch("app.chatgpt.views.chatgpt.managed_account_options")
     def test_chatgpt_login_response_does_not_echo_upstream_credentials(
         self,
+        managed_options,
         resolve_account,
         gateway,
     ):
@@ -431,6 +433,7 @@ class SecurityRegressionTests(TestCase):
             created_time=1,
             updated_time=1,
         )
+        managed_options.return_value = (Mock(account_id=account.id), [])
         resolve_account.return_value = account
         gateway.return_value = {
             "login_url": "https://www.tuwugpt.com/session/ready",

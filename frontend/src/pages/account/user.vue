@@ -160,9 +160,19 @@
           <t-input-number v-model="formData.monthly_quota" :min="0" />
         </t-form-item>
         <t-form-item label="关联号池" name="gptcar_list">
-          <t-select v-model="formData.gptcar_list" multiple placeholder="请选择号池">
+          <t-select
+            v-model="formData.gptcar_list"
+            multiple
+            :disabled="Boolean(activeSubscription)"
+            :placeholder="activeSubscription ? '由套餐配置自动管理' : '请选择免费或非商业号池'"
+          >
             <t-option v-for="car in carOptions" :key="car.id" :value="car.id" :label="car.car_name" />
           </t-select>
+          <template #help>
+            <span class="form-help">
+              {{ activeSubscription ? `${activeSubscription.plan_name} 用户只能使用该套餐关联的商业号池` : '商业账号请到“商业号池”页面维护' }}
+            </span>
+          </template>
         </t-form-item>
         <t-form-item label="模型限制" name="model_limit">
           <t-textarea
@@ -195,6 +205,7 @@ const formRef = ref()
 const tableData = ref<any[]>([])
 const carOptions = ref<any[]>([])
 const modelLimitInput = ref('')
+const activeSubscription = ref<any>(null)
 const query = ref('')
 const statusFilter = ref('')
 const selectedRowKeys = ref<Array<number | string>>([])
@@ -292,6 +303,7 @@ const showAddDialog = () => {
     monthly_quota: 0
   })
   modelLimitInput.value = ''
+  activeSubscription.value = null
   dialogVisible.value = true
 }
 
@@ -313,6 +325,7 @@ const showEditDialog = (row: any) => {
     monthly_quota: Number(row.monthly_quota || 0)
   })
   modelLimitInput.value = (row.model_limit || []).join(', ')
+  activeSubscription.value = row.subscription || null
   dialogVisible.value = true
 }
 
@@ -334,7 +347,7 @@ const handleSubmit = async () => {
     is_active: formData.is_active,
     isolated_session: formData.isolated_session,
     force_chat_mode: formData.force_chat_mode,
-    gptcar_list: formData.gptcar_list,
+    gptcar_list: activeSubscription.value ? [] : formData.gptcar_list,
     model_limit: modelLimit,
     remark: formData.remark,
     daily_quota: formData.daily_quota,

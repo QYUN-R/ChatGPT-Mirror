@@ -129,14 +129,14 @@ const adminNavigation: NavigationSection[] = [
       { label: '运维概览', path: '/account/overview', icon: 'dashboard' },
       { label: '用户', path: '/account/user', icon: 'user' },
       { label: '上游账号', path: '/account/chatgpt', icon: 'root-list' },
-      { label: '账号池', path: '/account/gptcar', icon: 'server' }
+      { label: '免费账号池', path: '/account/gptcar', icon: 'server' }
     ]
   },
   {
     label: '商业管理',
     items: [
       { label: '套餐配置', path: '/account/plans', icon: 'money-circle' },
-      { label: '商业号池', path: '/account/pools', icon: 'layers' },
+      { label: '套餐号池', path: '/account/pools', icon: 'layers' },
       { label: '用户订阅', path: '/account/subscriptions', icon: 'usergroup' },
       { label: '订单', path: '/account/orders', icon: 'order-ascending' },
       { label: '卡密管理', path: '/account/redemption-codes', icon: 'ticket' }

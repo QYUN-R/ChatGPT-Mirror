@@ -98,7 +98,7 @@ class UnifiedBackupView(APIView):
             ],
             "chatgpt_cars": list(
                 ChatgptCar.objects.values(
-                    "id", "car_name", "remark", "gpt_account_list", "created_time", "updated_time"
+                    "id", "car_name", "remark", "gpt_account_list", "is_commercial", "created_time", "updated_time"
                 )
             ),
             "visit_logs": list(

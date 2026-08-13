@@ -1,5 +1,6 @@
 import calendar
 import secrets
+import time
 from contextlib import contextmanager
 from datetime import timedelta
 
@@ -41,7 +42,7 @@ from app.billing.payment import (
     get_payment_provider,
 )
 from app.billing.selectors import CAPACITY_STATUSES, capacity_snapshot, plan_pool_ids, pool_capacity_snapshots
-from app.chatgpt.models import ChatgptAccount
+from app.chatgpt.models import ChatgptAccount, ChatgptCar
 
 
 def billing_enabled():
@@ -773,6 +774,238 @@ def _policy_is_usable(policy):
     )
 
 
+@transaction.atomic
+def sync_commercial_account_membership(account, pool=None):
+    """Keep the legacy pool mirror aligned with the commercial policy source of truth."""
+    selected_pool_id = pool.id if pool and not account.is_archived else None
+    for candidate in ChatgptCar.objects.select_for_update().all():
+        account_ids = [item for item in (candidate.gpt_account_list or []) if item != account.id]
+        if candidate.id == selected_pool_id:
+            account_ids.append(account.id)
+        if account_ids != (candidate.gpt_account_list or []):
+            candidate.gpt_account_list = account_ids
+            candidate.updated_time = int(time.time())
+            candidate.save(update_fields=["gpt_account_list", "updated_time"])
+
+
+@transaction.atomic
+def sync_commercial_pool_accounts(
+    pool,
+    *,
+    tier,
+    account_ids,
+    pool_name=None,
+    remark=None,
+    default_binding_limit=5,
+    apply_binding_limit=False,
+    actor=None,
+    ip_address=None,
+):
+    """Synchronize one commercial pool as an atomic, pool-centric operation."""
+    if tier not in PoolTier.values:
+        raise BillingError("套餐号池等级无效", code="invalid_pool_tier")
+
+    try:
+        default_binding_limit = int(default_binding_limit)
+    except (TypeError, ValueError) as exc:
+        raise BillingError("单账号绑定上限格式无效", code="invalid_binding_limit") from exc
+    if default_binding_limit < 1:
+        raise BillingError("单账号绑定上限必须至少为 1", code="invalid_binding_limit")
+
+    try:
+        selected_ids = list(dict.fromkeys(int(item) for item in (account_ids or [])))
+    except (TypeError, ValueError) as exc:
+        raise BillingError("上游账号列表格式无效", code="invalid_account_list") from exc
+
+    pool = ChatgptCar.objects.select_for_update().get(pk=pool.pk)
+    was_commercial = pool.is_commercial
+    pool.is_commercial = True
+    if pool_name is not None:
+        pool_name = str(pool_name).strip()
+        if not pool_name:
+            raise BillingError("号池名称不能为空", code="invalid_pool_name")
+        if len(pool_name) > 32:
+            raise BillingError("号池名称不能超过 32 个字符", code="invalid_pool_name")
+        if ChatgptCar.objects.exclude(pk=pool.pk).filter(car_name=pool_name).exists():
+            raise BillingError("号池名称已存在", code="duplicate_pool_name")
+        pool.car_name = pool_name
+    if remark is not None:
+        pool.remark = str(remark).strip()[:128]
+    if pool_name is not None or remark is not None or not was_commercial:
+        pool.updated_time = int(time.time())
+        pool.save(update_fields=["car_name", "remark", "is_commercial", "updated_time"])
+    linked_plan_tiers = set(
+        Plan.objects.filter(is_archived=False)
+        .filter(Q(pool=pool) | Q(pool_links__pool=pool, pool_links__is_active=True))
+        .values_list("pool_tier", flat=True)
+        .distinct()
+    )
+    if linked_plan_tiers and linked_plan_tiers != {tier}:
+        raise BillingError(
+            "号池已关联其他等级的套餐，请先在套餐配置中调整",
+            code="pool_tier_conflict",
+        )
+
+    accounts = list(
+        ChatgptAccount.objects.select_for_update()
+        .filter(pk__in=selected_ids, is_archived=False)
+        .order_by("id")
+    )
+    if len(accounts) != len(selected_ids):
+        raise BillingError("部分上游账号不存在或已删除", code="account_not_found")
+    invalid_accounts = [account.chatgpt_username for account in accounts if not supports_commercial_pool_account(account)]
+    if invalid_accounts:
+        raise BillingError(
+            "套餐号池只允许加入 Plus、Pro、Team 或 Business 账号",
+            code="unsupported_commercial_account",
+        )
+
+    current_policies = list(
+        PoolAccountPolicy.objects.select_for_update()
+        .select_related("account", "pool")
+        .filter(Q(pool=pool) | Q(account_id__in=selected_ids))
+        .order_by("account_id")
+    )
+    policy_by_account_id = {policy.account_id: policy for policy in current_policies}
+    current_pool_policies = [policy for policy in current_policies if policy.pool_id == pool.id]
+    affected_account_ids = {policy.account_id for policy in current_pool_policies} | set(selected_ids)
+    list(
+        AccountAssignment.objects.select_for_update()
+        .filter(account_id__in=affected_account_ids, active=True)
+        .values_list("id", flat=True)
+    )
+    binding_counts = {
+        row["account_id"]: row["total"]
+        for row in AccountAssignment.objects.filter(account_id__in=affected_account_ids, active=True)
+        .values("account_id")
+        .annotate(total=Count("id"))
+    }
+
+    selected_id_set = set(selected_ids)
+    for policy in current_pool_policies:
+        if policy.account_id not in selected_id_set and binding_counts.get(policy.account_id, 0):
+            raise BillingError(
+                f"账号 {policy.account.chatgpt_username} 仍有用户正在使用，请先迁移后再移出号池",
+                code="account_in_use",
+            )
+
+    for account in accounts:
+        policy = policy_by_account_id.get(account.id)
+        active_bindings = binding_counts.get(account.id, 0)
+        if policy and policy.pool_id != pool.id:
+            raise BillingError(
+                f"账号 {account.chatgpt_username} 已属于号池 {policy.pool.car_name}，请先从原号池移出",
+                code="account_already_in_pool",
+            )
+        if policy and policy.tier != tier and active_bindings:
+            raise BillingError(
+                f"账号 {account.chatgpt_username} 仍有用户正在使用，不能直接跨等级移动",
+                code="account_in_use",
+            )
+        next_limit = default_binding_limit if apply_binding_limit or not policy else policy.binding_limit
+        if next_limit < active_bindings:
+            raise BillingError(
+                f"账号 {account.chatgpt_username} 当前已有 {active_bindings} 人使用，绑定上限不能低于当前人数",
+                code="binding_limit_below_usage",
+            )
+
+    removed_policy_ids = []
+    for policy in current_pool_policies:
+        if policy.account_id not in selected_id_set:
+            removed_policy_ids.append(policy.id)
+            policy.delete()
+
+    saved_policy_ids = []
+    for account in accounts:
+        policy = policy_by_account_id.get(account.id) or PoolAccountPolicy(account=account)
+        policy.pool = pool
+        policy.tier = tier
+        if apply_binding_limit or not policy.pk:
+            policy.binding_limit = default_binding_limit
+        policy.save()
+        saved_policy_ids.append(policy.id)
+
+    for candidate in ChatgptCar.objects.select_for_update().all():
+        next_account_ids = [
+            item for item in (candidate.gpt_account_list or [])
+            if item not in affected_account_ids and item not in selected_id_set
+        ]
+        if candidate.id == pool.id:
+            next_account_ids.extend(selected_ids)
+        if next_account_ids != (candidate.gpt_account_list or []):
+            candidate.gpt_account_list = next_account_ids
+            candidate.updated_time = int(time.time())
+            candidate.save(update_fields=["gpt_account_list", "updated_time"])
+
+    audit(
+        "commercial_pool.synced",
+        pool,
+        actor=actor,
+        ip_address=ip_address,
+        detail={
+            "tier": tier,
+            "pool_name": pool.car_name,
+            "account_ids": selected_ids,
+            "saved_policy_ids": saved_policy_ids,
+            "removed_policy_ids": removed_policy_ids,
+            "default_binding_limit": default_binding_limit,
+            "apply_binding_limit": bool(apply_binding_limit),
+        },
+    )
+    return pool
+
+
+@transaction.atomic
+def archive_upstream_account(account, *, actor=None):
+    account = ChatgptAccount.objects.select_for_update().get(pk=account.pk)
+    active_bindings = AccountAssignment.objects.filter(account=account, active=True).count()
+    if active_bindings:
+        raise BillingError(
+            "该账号仍有用户正在使用，请先迁移用户后再删除",
+            code="account_in_use",
+        )
+
+    policy_ids = list(PoolAccountPolicy.objects.filter(account=account).values_list("id", flat=True))
+    PoolAccountPolicy.objects.filter(account=account).delete()
+    sync_commercial_account_membership(account, None)
+
+    account.access_token = ""
+    account.session_token = None
+    account.extra_cookies = []
+    account.refresh_token = None
+    account.refresh_client_id = None
+    account.access_token_valid = False
+    account.session_token_valid = False
+    account.auth_status = False
+    account.proxy_node_id = None
+    account.last_error = ""
+    account.is_archived = True
+    account.archived_at = timezone.now()
+    account.updated_time = int(time.time())
+    account.save(update_fields=[
+        "access_token",
+        "session_token",
+        "extra_cookies",
+        "refresh_token",
+        "refresh_client_id",
+        "access_token_valid",
+        "session_token_valid",
+        "auth_status",
+        "proxy_node_id",
+        "last_error",
+        "is_archived",
+        "archived_at",
+        "updated_time",
+    ])
+    audit(
+        "chatgpt_account.deleted",
+        account,
+        actor=actor,
+        detail={"removed_policy_ids": policy_ids, "credentials_cleared": True},
+    )
+    return account
+
+
 def _web_probe_invalidates_credentials(error_code):
     return str(error_code or "").strip().lower() in {
         "token_invalidated",
@@ -782,7 +1015,7 @@ def _web_probe_invalidates_credentials(error_code):
 
 
 @transaction.atomic
-def ensure_assignment(subscription, *, reason="first_use", force=False):
+def ensure_assignment(subscription, *, reason="first_use", force=False, preferred_policy_id=None):
     subscription = Subscription.objects.select_for_update().select_related(
         "user",
         "plan",
@@ -795,7 +1028,7 @@ def ensure_assignment(subscription, *, reason="first_use", force=False):
         subscription=subscription,
     ).first()
     linked_pool_ids = plan_pool_ids(subscription.plan)
-    if assignment and assignment.active and not force:
+    if assignment and assignment.active and not force and preferred_policy_id is None:
         policy = PoolAccountPolicy.objects.select_related("account").filter(
             account=assignment.account,
             pool_id__in=linked_pool_ids,
@@ -838,25 +1071,39 @@ def ensure_assignment(subscription, *, reason="first_use", force=False):
         status__in=(ReservationStatus.ACTIVE, ReservationStatus.ASSIGNED),
     ).order_by("-created_at").first()
     reserved_pool_id = reservation.pool_id if reservation else None
-    candidates = [
-        policy
-        for policy in policies
-        if binding_counts.get(policy.account_id, 0) < policy.binding_limit
-        and not (force and assignment and policy.account_id == assignment.account_id)
-    ]
-    if not candidates:
-        raise CapacityUnavailable("当前套餐号池没有可分配的健康上游账号")
-    pool_priorities = {pool_id: index for index, pool_id in enumerate(linked_pool_ids)}
-    selected = min(
-        candidates,
-        key=lambda policy: (
-            0 if reserved_pool_id and policy.pool_id == reserved_pool_id else 1,
-            binding_counts.get(policy.account_id, 0) / policy.binding_limit,
-            recent_counts.get(policy.account_id, 0),
-            pool_priorities.get(policy.pool_id, len(pool_priorities)),
-            policy.account_id,
-        ),
-    )
+    if preferred_policy_id is not None:
+        selected = next((policy for policy in policies if policy.id == preferred_policy_id), None)
+        if selected is None:
+            raise BillingError("所选账号不属于当前套餐号池或当前不可用", code="invalid_account_choice")
+        if (
+            assignment
+            and assignment.active
+            and assignment.account_id == selected.account_id
+            and assignment.pool_id == selected.pool_id
+        ):
+            return assignment
+        if binding_counts.get(selected.account_id, 0) >= selected.binding_limit:
+            raise CapacityUnavailable("所选账号当前人数已满，请选择其他账号")
+    else:
+        candidates = [
+            policy
+            for policy in policies
+            if binding_counts.get(policy.account_id, 0) < policy.binding_limit
+            and not (force and assignment and policy.account_id == assignment.account_id)
+        ]
+        if not candidates:
+            raise CapacityUnavailable("当前套餐号池没有可分配的健康上游账号")
+        pool_priorities = {pool_id: index for index, pool_id in enumerate(linked_pool_ids)}
+        selected = min(
+            candidates,
+            key=lambda policy: (
+                0 if reserved_pool_id and policy.pool_id == reserved_pool_id else 1,
+                binding_counts.get(policy.account_id, 0) / policy.binding_limit,
+                recent_counts.get(policy.account_id, 0),
+                pool_priorities.get(policy.pool_id, len(pool_priorities)),
+                policy.account_id,
+            ),
+        )
     old_account = assignment.account if assignment else None
     now = timezone.now()
     if assignment:
@@ -922,14 +1169,66 @@ def ensure_assignment(subscription, *, reason="first_use", force=False):
     return assignment
 
 
-def resolve_managed_account(user):
+def managed_account_options(user):
+    if not billing_enabled() or user.is_staff or user.is_superuser:
+        return None, []
+    subscription = refresh_subscription_state(user)
+    if not subscription:
+        if billing_enforced():
+            raise SubscriptionInactive("当前账号尚未开通套餐")
+        return None, []
+    if not subscription.is_service_active:
+        raise SubscriptionInactive("套餐已到期或暂停，请先续费")
+
+    assignment = ensure_assignment(subscription)
+    linked_pool_ids = plan_pool_ids(subscription.plan)
+    policies = list(
+        PoolAccountPolicy.objects.select_related("account", "pool")
+        .filter(
+            pool_id__in=linked_pool_ids,
+            tier=subscription.plan.pool_tier,
+            enabled=True,
+            health_status="HEALTHY",
+            account__is_archived=False,
+            account__auth_status=True,
+        )
+        .order_by("pool_id", "account_id")
+    )
+    policies = [policy for policy in policies if _policy_is_usable(policy)]
+    binding_counts = {
+        row["account_id"]: row["total"]
+        for row in AccountAssignment.objects.filter(account_id__in=[item.account_id for item in policies], active=True)
+        .values("account_id")
+        .annotate(total=Count("id"))
+    }
+    pool_priorities = {pool_id: index for index, pool_id in enumerate(linked_pool_ids)}
+    options = [
+        policy
+        for policy in policies
+        if policy.account_id == assignment.account_id
+        or binding_counts.get(policy.account_id, 0) < policy.binding_limit
+    ]
+    options.sort(key=lambda policy: (
+        0 if policy.account_id == assignment.account_id else 1,
+        pool_priorities.get(policy.pool_id, len(pool_priorities)),
+        policy.account_id,
+    ))
+    return assignment, options
+
+
+def resolve_managed_account(user, *, preferred_policy_id=None):
     if not billing_enabled() or user.is_staff or user.is_superuser:
         return None
     subscription = refresh_subscription_state(user)
     if subscription:
         if not subscription.is_service_active:
             raise SubscriptionInactive("套餐已到期或暂停，请先续费")
-        return ensure_assignment(subscription).account
+        reason = "user_selected" if preferred_policy_id is not None else "first_use"
+        return ensure_assignment(
+            subscription,
+            reason=reason,
+            preferred_policy_id=preferred_policy_id,
+        ).account
     if billing_enforced():
         raise SubscriptionInactive("当前账号尚未开通套餐")
     return None

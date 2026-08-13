@@ -19,7 +19,8 @@ from rest_framework.exceptions import ValidationError
 from django.utils import timezone
 
 from app.billing.exceptions import BillingError
-from app.billing.services import record_usage, resolve_managed_account
+from app.billing.models import supports_commercial_pool_account
+from app.billing.services import archive_upstream_account, managed_account_options, record_usage, resolve_managed_account
 
 DEFAULT_REFRESH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
@@ -63,8 +64,16 @@ class ChatGPTAccountEnum(APIView):
     permission_classes = (IsAuthenticated, IsAdminUser)
 
     def get(self, request):
-        result = ChatgptAccount.objects.filter(auth_status=True, is_archived=False).order_by("-id").values(
-            "id", "chatgpt_username", "plan_type").all()
+        accounts = ChatgptAccount.objects.filter(auth_status=True, is_archived=False).order_by("-id")
+        result = [
+            {
+                "id": account.id,
+                "chatgpt_username": account.chatgpt_username,
+                "plan_type": account.plan_type,
+            }
+            for account in accounts
+            if not supports_commercial_pool_account(account)
+        ]
         return Response({"data": result})
 
 
@@ -142,18 +151,12 @@ class ChatGPTAccountView(generics.ListCreateAPIView):
         serializer.is_valid(raise_exception=True)
         gpt_obj = ChatgptAccount.objects.filter(chatgpt_username=serializer.data["chatgpt_username"]).first()
         if gpt_obj:
-            for car_obj in ChatgptCar.objects.all():
-                account_ids = [item for item in (car_obj.gpt_account_list or []) if item != gpt_obj.id]
-                if account_ids != (car_obj.gpt_account_list or []):
-                    car_obj.gpt_account_list = account_ids
-                    car_obj.updated_time = int(time.time())
-                    car_obj.save(update_fields=["gpt_account_list", "updated_time"])
-            gpt_obj.is_archived = True
-            gpt_obj.archived_at = timezone.now()
-            gpt_obj.auth_status = False
-            gpt_obj.save(update_fields=["is_archived", "archived_at", "auth_status", "updated_time"])
+            try:
+                archive_upstream_account(gpt_obj, actor=request.user)
+            except BillingError as exc:
+                raise ValidationError({"message": exc.message, "code": exc.code})
 
-        return Response({"message": "账号已归档，历史记录和绑定事件已保留"})
+        return Response({"message": "账号已删除，凭据已清除，历史审计已保留"})
 
 
 class ChatGPTTokenExpiryView(APIView):
@@ -218,19 +221,28 @@ class ChatGPTLoginView(APIView):
     def post(self, request):
         serializer = ChatGPTLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        requested_id = serializer.validated_data.get("chatgpt_id")
         try:
-            managed_account = resolve_managed_account(request.user)
+            managed_assignment, managed_policies = managed_account_options(request.user)
         except BillingError as exc:
             raise ValidationError({"message": exc.message, "code": exc.code})
-        user_gpt_list = (
-            [managed_account]
-            if managed_account
-            else ChatgptAccount.get_by_gptcar_list(request.user.gptcar_list)
-        )
+        managed = managed_assignment is not None
+        if managed:
+            try:
+                managed_account = resolve_managed_account(
+                    request.user,
+                    preferred_policy_id=requested_id if requested_id is not None else None,
+                )
+            except BillingError as exc:
+                raise ValidationError({"message": exc.message, "code": exc.code})
+            user_gpt_list = [managed_account]
+        else:
+            managed_account = None
+            user_gpt_list = ChatgptAccount.get_by_gptcar_list(request.user.gptcar_list)
         user_gpt_id_list = [i.id for i in user_gpt_list]
 
         login_mode = serializer.validated_data.get("login_mode", "web")
-        chatgpt_id = None if managed_account else serializer.validated_data.get("chatgpt_id")
+        chatgpt_id = None if managed else requested_id
         if chatgpt_id is not None and chatgpt_id not in user_gpt_id_list:
             raise ValidationError("该账号不属于当前用户")
 
@@ -281,7 +293,7 @@ class ChatGPTLoginView(APIView):
         res_json = req_gateway("post", "/api/login", json=payload)
 
         save_visit_log(request, "choose-gpt", chatgpt.chatgpt_username)
-        if managed_account:
+        if managed:
             record_usage(request.user, chatgpt)
 
         safe_response = {

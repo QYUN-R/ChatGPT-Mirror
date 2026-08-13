@@ -11,7 +11,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from rest_framework.test import APIClient
 
 from app.accounts.models import User
-from app.accounts.views import UserChatGPTAccountList
+from app.accounts.views import UserChatGPTAccountList, UserRelateGPTCarView
 from app.billing.exceptions import BillingError, CapacityUnavailable, PaymentRejected, SubscriptionInactive
 from app.billing.models import (
     AccountAssignment,
@@ -39,9 +39,13 @@ from app.billing.services import (
     refresh_subscription_state,
     refund_order,
     resolve_managed_account,
+    archive_upstream_account,
+    sync_commercial_pool_accounts,
 )
 from app.chatgpt.models import ChatgptAccount, ChatgptCar
 from app.chatgpt.views.chatgpt import ChatGPTLoginView
+from app.chatgpt.views.gptcar import GptCarEnum, GptCarView
+from app.billing.admin_views import AdminPlanView, AdminPoolView
 from app.fields import decrypt_value
 import json
 
@@ -58,12 +62,14 @@ class BillingServiceTests(TestCase):
         self.standard_pool = ChatgptCar.objects.create(
             car_name="Plus 普通号池",
             gpt_account_list=[],
+            is_commercial=True,
             created_time=1,
             updated_time=1,
         )
         self.premium_pool = ChatgptCar.objects.create(
             car_name="Plus 高级号池",
             gpt_account_list=[],
+            is_commercial=True,
             created_time=1,
             updated_time=1,
         )
@@ -444,18 +450,285 @@ class BillingServiceTests(TestCase):
         self.assertEqual(payload["access_token"], "[redacted]")
         self.assertEqual(payload["nested"]["cookie"], "[redacted]")
 
-    def test_subscription_user_receives_managed_account_without_real_id(self):
+    def test_subscription_user_receives_all_healthy_accounts_from_its_plan_only(self):
         _, subscription = self.purchase()
-        ensure_assignment(subscription)
+        assignment = ensure_assignment(subscription)
         factory = APIRequestFactory()
         request = factory.get("/0x/user/chatgpt-list")
         force_authenticate(request, user=self.user)
         with patch("app.accounts.views.req_gateway", return_value={}):
             response = UserChatGPTAccountList.as_view()(request)
         self.assertTrue(response.data["managed_assignment"])
-        self.assertEqual(response.data["results"][0]["id"], 0)
-        self.assertEqual(response.data["results"][0]["chatgpt_flag"], "套餐专属账号")
+        self.assertEqual(len(response.data["results"]), 2)
+        visible_policy_ids = {item["id"] for item in response.data["results"]}
+        self.assertEqual(
+            visible_policy_ids,
+            set(PoolAccountPolicy.objects.filter(account__in=self.standard_accounts).values_list("id", flat=True)),
+        )
+        self.assertNotIn(
+            PoolAccountPolicy.objects.get(account=self.premium_account).id,
+            visible_policy_ids,
+        )
+        current = next(item for item in response.data["results"] if item["is_current"])
+        self.assertEqual(
+            PoolAccountPolicy.objects.get(pk=current["id"]).account_id,
+            assignment.account_id,
+        )
+        self.assertEqual(response.data["results"][0]["chatgpt_flag"], "套餐账号 01")
         self.assertEqual(response.data["results"][0]["default_login_mode"], "web")
+
+    def test_managed_user_can_select_another_account_in_same_plan_pool(self):
+        _, subscription = self.purchase()
+        assignment = ensure_assignment(subscription)
+        target_policy = PoolAccountPolicy.objects.filter(
+            pool=self.standard_pool,
+        ).exclude(account=assignment.account).get()
+        request = APIRequestFactory().post(
+            "/0x/chatgpt/login",
+            {"chatgpt_id": target_policy.id, "login_mode": "api"},
+            format="json",
+            HTTP_USER_AGENT="managed-account-switch-test",
+        )
+        force_authenticate(request, user=self.user)
+        with patch("app.chatgpt.views.chatgpt.req_gateway", side_effect=[{}, {"message": "ok"}]) as gateway:
+            response = ChatGPTLoginView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.account_id, target_policy.account_id)
+        self.assertEqual(gateway.call_args_list[1].kwargs["json"]["access_token"], target_policy.account.access_token)
+
+    def test_managed_user_cannot_select_account_from_another_tier(self):
+        self.purchase()
+        premium_policy = PoolAccountPolicy.objects.get(account=self.premium_account)
+        request = APIRequestFactory().post(
+            "/0x/chatgpt/login",
+            {"chatgpt_id": premium_policy.id, "login_mode": "api"},
+            format="json",
+        )
+        force_authenticate(request, user=self.user)
+        response = ChatGPTLoginView.as_view()(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "invalid_account_choice")
+
+    def test_used_upstream_account_cannot_be_deleted(self):
+        _, subscription = self.purchase()
+        assignment = ensure_assignment(subscription)
+        with self.assertRaises(BillingError) as captured:
+            archive_upstream_account(assignment.account)
+        self.assertEqual(captured.exception.code, "account_in_use")
+        assignment.account.refresh_from_db()
+        self.assertFalse(assignment.account.is_archived)
+
+    def test_unused_upstream_account_delete_clears_credentials_and_pool_membership(self):
+        account = self.standard_accounts[1]
+        self.standard_pool.gpt_account_list = [account.id]
+        self.standard_pool.save(update_fields=["gpt_account_list"])
+
+        archive_upstream_account(account)
+
+        account.refresh_from_db()
+        self.standard_pool.refresh_from_db()
+        self.assertTrue(account.is_archived)
+        self.assertEqual(account.access_token, "")
+        self.assertIsNone(account.session_token)
+        self.assertFalse(PoolAccountPolicy.objects.filter(account=account).exists())
+        self.assertNotIn(account.id, self.standard_pool.gpt_account_list)
+
+    def test_legacy_pool_api_hides_commercial_pools(self):
+        free_pool = ChatgptCar.objects.create(
+            car_name="free-only-pool",
+            gpt_account_list=[],
+            created_time=1,
+            updated_time=1,
+        )
+        admin = User.objects.create_superuser(username="pool-admin", password="Strong-password-123!")
+        request = APIRequestFactory().get("/0x/chatgpt/car-enum")
+        force_authenticate(request, user=admin)
+
+        response = GptCarEnum.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        visible_ids = {item["id"] for item in response.data["data"]}
+        self.assertIn(free_pool.id, visible_ids)
+        self.assertNotIn(self.standard_pool.id, visible_ids)
+        self.assertNotIn(self.premium_pool.id, visible_ids)
+
+    def test_legacy_pool_api_rejects_commercial_accounts(self):
+        free_pool = ChatgptCar.objects.create(
+            car_name="free-edit-pool",
+            gpt_account_list=[],
+            created_time=1,
+            updated_time=1,
+        )
+        admin = User.objects.create_superuser(username="pool-edit-admin", password="Strong-password-123!")
+        request = APIRequestFactory().post(
+            "/0x/chatgpt/car",
+            {
+                "id": free_pool.id,
+                "car_name": free_pool.car_name,
+                "gpt_account_list": [self.standard_accounts[0].id],
+                "remark": "",
+            },
+            format="json",
+        )
+        force_authenticate(request, user=admin)
+
+        response = GptCarView.as_view()(request)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("商业号池", str(response.data["message"]))
+
+    def test_pool_centric_sync_adds_multiple_accounts_and_preserves_existing_limits(self):
+        existing_policy = PoolAccountPolicy.objects.get(account=self.standard_accounts[0])
+        existing_policy.binding_limit = 7
+        existing_policy.save(update_fields=["binding_limit", "updated_at"])
+        new_account = self.create_account("standard-c@example.com")
+
+        sync_commercial_pool_accounts(
+            self.standard_pool,
+            tier=PoolTier.STANDARD,
+            account_ids=[self.standard_accounts[0].id, new_account.id],
+            default_binding_limit=4,
+        )
+
+        existing_policy.refresh_from_db()
+        new_policy = PoolAccountPolicy.objects.get(account=new_account)
+        self.standard_pool.refresh_from_db()
+        self.assertEqual(existing_policy.binding_limit, 7)
+        self.assertEqual(new_policy.binding_limit, 4)
+        self.assertEqual(new_policy.pool_id, self.standard_pool.id)
+        self.assertEqual(
+            set(self.standard_pool.gpt_account_list),
+            {self.standard_accounts[0].id, new_account.id},
+        )
+        self.assertFalse(PoolAccountPolicy.objects.filter(account=self.standard_accounts[1]).exists())
+
+    def test_pool_centric_sync_rejects_account_that_belongs_to_another_pool(self):
+        with self.assertRaises(BillingError) as captured:
+            sync_commercial_pool_accounts(
+                self.standard_pool,
+                tier=PoolTier.STANDARD,
+                account_ids=[self.premium_account.id],
+            )
+        self.assertEqual(captured.exception.code, "account_already_in_pool")
+
+    def test_pool_centric_sync_cannot_remove_an_account_with_active_users(self):
+        _, subscription = self.purchase()
+        assignment = ensure_assignment(subscription)
+        remaining_ids = [
+            account.id for account in self.standard_accounts if account.id != assignment.account_id
+        ]
+
+        with self.assertRaises(BillingError) as captured:
+            sync_commercial_pool_accounts(
+                self.standard_pool,
+                tier=PoolTier.STANDARD,
+                account_ids=remaining_ids,
+            )
+
+        self.assertEqual(captured.exception.code, "account_in_use")
+        self.assertTrue(PoolAccountPolicy.objects.filter(account_id=assignment.account_id).exists())
+
+    def test_pool_centric_sync_cannot_reduce_limit_below_active_bindings(self):
+        _, subscription = self.purchase()
+        assignment = ensure_assignment(subscription)
+
+        with self.assertRaises(BillingError) as captured:
+            sync_commercial_pool_accounts(
+                self.standard_pool,
+                tier=PoolTier.STANDARD,
+                account_ids=[account.id for account in self.standard_accounts],
+                default_binding_limit=0,
+                apply_binding_limit=True,
+            )
+
+        self.assertEqual(captured.exception.code, "invalid_binding_limit")
+
+    def test_legacy_bulk_binding_rejects_commercial_pool_and_managed_user(self):
+        admin = User.objects.create_superuser(username="legacy-bind-admin", password="Strong-password-123!")
+        plain_user = User.objects.create_user(username="legacy-bind-user", password="Strong-password-123!")
+        request = APIRequestFactory().post(
+            "/0x/user/relat-gptcar",
+            {"user_id_list": [plain_user.id], "gptcar_id_list": [self.standard_pool.id]},
+            format="json",
+        )
+        force_authenticate(request, user=admin)
+        response = UserRelateGPTCarView.as_view()(request)
+        self.assertEqual(response.status_code, 400)
+
+        free_pool = ChatgptCar.objects.create(
+            car_name="legacy-free-pool",
+            gpt_account_list=[],
+            created_time=1,
+            updated_time=1,
+        )
+        self.purchase()
+        request = APIRequestFactory().post(
+            "/0x/user/relat-gptcar",
+            {"user_id_list": [self.user.id], "gptcar_id_list": [free_pool.id]},
+            format="json",
+        )
+        force_authenticate(request, user=admin)
+        response = UserRelateGPTCarView.as_view()(request)
+        self.assertEqual(response.status_code, 400)
+
+    def test_admin_pool_api_returns_one_row_per_commercial_pool(self):
+        admin = User.objects.create_superuser(username="pool-view-admin", password="Strong-password-123!")
+        request = APIRequestFactory().get("/0x/admin/pools")
+        force_authenticate(request, user=admin)
+
+        response = AdminPoolView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        rows = {row["id"]: row for row in response.data["commercial_pools"]}
+        self.assertEqual(rows[self.standard_pool.id]["account_count"], 2)
+        self.assertEqual(rows[self.standard_pool.id]["total_capacity"], 10)
+        self.assertEqual(rows[self.premium_pool.id]["account_count"], 1)
+
+    def test_admin_can_create_commercial_pool_with_multiple_accounts(self):
+        admin = User.objects.create_superuser(username="pool-create-admin", password="Strong-password-123!")
+        first = self.create_account("new-pool-first@example.com")
+        second = self.create_account("new-pool-second@example.com")
+        request = APIRequestFactory().post(
+            "/0x/admin/pools",
+            {
+                "action": "create_pool",
+                "pool_name": "Plus 普通备用池",
+                "tier": PoolTier.STANDARD,
+                "account_ids": [first.id, second.id],
+                "default_binding_limit": 6,
+            },
+            format="json",
+        )
+        force_authenticate(request, user=admin)
+
+        response = AdminPoolView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        pool = ChatgptCar.objects.get(pk=response.data["pool_id"])
+        self.assertEqual(set(pool.gpt_account_list), {first.id, second.id})
+        self.assertEqual(
+            set(PoolAccountPolicy.objects.filter(pool=pool).values_list("binding_limit", flat=True)),
+            {6},
+        )
+
+    def test_plan_api_does_not_offer_free_only_pool(self):
+        free_pool = ChatgptCar.objects.create(
+            car_name="plan-free-only-pool",
+            gpt_account_list=[],
+            created_time=1,
+            updated_time=1,
+        )
+        admin = User.objects.create_superuser(username="plan-pool-admin", password="Strong-password-123!")
+        request = APIRequestFactory().get("/0x/admin/plans")
+        force_authenticate(request, user=admin)
+
+        response = AdminPlanView.as_view()(request)
+
+        pool_ids = {row["id"] for row in response.data["pools"]}
+        self.assertNotIn(free_pool.id, pool_ids)
+        self.assertIn(self.standard_pool.id, pool_ids)
 
     @override_settings(BILLING_ENABLED=False)
     def test_disabled_billing_keeps_legacy_account_selection(self):
@@ -551,6 +824,7 @@ class BillingApiTests(TestCase):
         self.pool = ChatgptCar.objects.create(
             car_name="API Plus Pool",
             gpt_account_list=[],
+            is_commercial=True,
             created_time=1,
             updated_time=1,
         )

@@ -1,7 +1,7 @@
 import time
 from datetime import datetime
 
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 from django.middleware.csrf import get_token, rotate_token
@@ -16,14 +16,14 @@ from app.accounts.serializers import ShowVisitLogModelSerializer, AddUserAccount
     ShowUserAccountModelSerializer, BatchModelLimitSerializer, BatchUserActionSerializer, ChangePasswordSerializer
 from app.accounts.authentication import set_auth_cookie
 from rest_framework.authtoken.models import Token
-from app.chatgpt.models import ChatgptAccount
+from app.chatgpt.models import ChatgptAccount, ChatgptCar
 from app.page import DefaultPageNumberPagination
 from app.settings import ADMIN_USERNAME
 from app.utils import get_client_ip, get_request_subject, req_gateway
 from app.accounts.email_auth import has_verified_email, issue_binding_ticket
 from app.accounts.views.login import issue_user_token
 from app.billing.exceptions import BillingError
-from app.billing.services import audit, resolve_managed_account
+from app.billing.services import audit, has_managed_subscription, managed_account_options, resolve_managed_account
 
 
 def revoke_user_sessions(user):
@@ -110,13 +110,14 @@ class UserChatGPTAccountList(APIView):
     def get(self, request):
         results = []
         try:
-            managed_account = resolve_managed_account(request.user)
+            managed_assignment, managed_policies = managed_account_options(request.user)
         except BillingError as exc:
             raise ValidationError({"message": exc.message, "code": exc.code})
+        managed = managed_assignment is not None
         user_gpt_list = (
-            [managed_account]
-            if managed_account
-            else ChatgptAccount.get_by_gptcar_list(request.user.gptcar_list)
+            [policy.account for policy in managed_policies]
+            if managed
+            else list(ChatgptAccount.get_by_gptcar_list(request.user.gptcar_list))
         )
         for account in user_gpt_list:
             try:
@@ -133,7 +134,9 @@ class UserChatGPTAccountList(APIView):
         auth_user_gpt_list = [i for i in user_gpt_list if i.auth_status]
         current_minute = datetime.now().minute
 
-        for line in auth_user_gpt_list or user_gpt_list:
+        visible_accounts = auth_user_gpt_list or user_gpt_list
+        policy_by_account_id = {policy.account_id: policy for policy in managed_policies}
+        for index, line in enumerate(visible_accounts, start=1):
             gpt_use_count_dict = use_count_dict.get(line.chatgpt_username, {}).get("gpt-4o", {})
             last_3h_use_count = (gpt_use_count_dict.get("last_1h", 0) +
                           gpt_use_count_dict.get("last_2h", 0) + gpt_use_count_dict.get("last_3h", 0) +
@@ -144,19 +147,20 @@ class UserChatGPTAccountList(APIView):
             if line.session_token_valid:
                 supported_login_modes.append("web")
             results.append({
-                "id": 0 if managed_account else line.id,
+                "id": policy_by_account_id[line.id].id if managed else line.id,
                 "use_count": last_3h_use_count,
-                "chatgpt_flag": "套餐专属账号" if managed_account else "{:03}{}".format(line.id, line.chatgpt_username[:3]),
+                "chatgpt_flag": f"套餐账号 {index:02d}" if managed else "{:03}{}".format(line.id, line.chatgpt_username[:3]),
                 "plan_type": line.plan_type,
                 "auth_status": line.auth_status,
                 "access_token_valid": line.access_token_valid,
                 "session_token_valid": line.session_token_valid,
                 "supported_login_modes": supported_login_modes,
                 "default_login_mode": "web",
-                "managed_assignment": bool(managed_account),
+                "managed_assignment": managed,
+                "is_current": bool(managed and managed_assignment.account_id == line.id),
             })
 
-        return Response({"results": results, "managed_assignment": bool(managed_account)})
+        return Response({"results": results, "managed_assignment": managed})
 
 
 class BatchModelLimit(APIView):
@@ -222,10 +226,23 @@ class UserRelateGPTCarView(APIView):
     def post(self, request, *args, **kwargs):
         serializer = UserBindChatGPTSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        for user_id in serializer.data["user_id_list"]:
-            user = User.objects.filter(id=user_id).first()
-            user.gptcar_list = serializer.data["gptcar_id_list"]
-            user.save()
+        user_ids = serializer.validated_data["user_id_list"]
+        pool_ids = list(dict.fromkeys(serializer.validated_data["gptcar_id_list"]))
+        if ChatgptCar.objects.filter(id__in=pool_ids, is_commercial=True).exists():
+            raise ValidationError({"message": "商业号池由套餐自动管理，不能通过旧批量绑定接口分配"})
+        if ChatgptCar.objects.filter(id__in=pool_ids).count() != len(pool_ids):
+            raise ValidationError({"message": "部分账号池不存在"})
+
+        with transaction.atomic():
+            users = list(User.objects.select_for_update().filter(id__in=user_ids))
+            if len(users) != len(set(user_ids)):
+                raise ValidationError({"message": "部分用户不存在"})
+            managed_users = [user.username for user in users if has_managed_subscription(user)]
+            if managed_users:
+                raise ValidationError({"message": "套餐用户的商业号池由套餐自动管理，不能手动绑定"})
+            for user in users:
+                user.gptcar_list = pool_ids
+                user.save(update_fields=["gptcar_list"])
 
         return Response({"message": "绑定成功"})
 
@@ -287,7 +304,7 @@ class UserAccountView(generics.ListCreateAPIView):
         if "expired_date" in serializer.validated_data:
             user.expired_date = serializer.validated_data["expired_date"]
 
-        user.gptcar_list = serializer.data["gptcar_list"]
+        user.gptcar_list = [] if has_managed_subscription(user) else serializer.data["gptcar_list"]
         user.is_active = serializer.data["is_active"]
         user.model_limit = serializer.data["model_limit"]
         user.isolated_session = serializer.data["isolated_session"]

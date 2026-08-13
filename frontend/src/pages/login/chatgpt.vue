@@ -27,7 +27,7 @@
           </div>
           <t-space>
             <t-button theme="primary" :disabled="tableLoading" @click="onSelect(null)">
-              智能分配最空闲账号
+              {{ managedAssignment ? '使用当前分配账号' : '智能分配最空闲账号' }}
             </t-button>
             <t-button variant="text" @click="router.push('/account/profile')">账户中心</t-button>
           </t-space>
@@ -61,7 +61,10 @@
                       style="width: 35px"
                       :class="{ 'shiny-blue': item.plan_type !== 'free' }"
                     >{{ item.plan_type }}</t-tag>
-                    <span>{{ item.chatgpt_flag }}</span>
+                    <span class="account-card__name">
+                      {{ item.chatgpt_flag }}
+                      <t-tag v-if="item.is_current" size="small" theme="success" variant="light">正在使用</t-tag>
+                    </span>
                   </div>
                 </div>
 
@@ -132,8 +135,10 @@ interface TableData {
   session_token_valid: boolean
   supported_login_modes: string[]
   default_login_mode: 'api' | 'web'
+  is_current?: boolean
 }
 const tableData = ref<TableData[]>([])
+const managedAssignment = ref(false)
 const selectedMode = ref<'api' | 'web'>('web')
 const preferredMode = ref<'api' | 'web'>('web')
 
@@ -164,6 +169,7 @@ const getUserChatGPTAccountList = async () => {
   
   const results = data.results || []
   tableData.value = results
+  managedAssignment.value = Boolean(data.managed_assignment)
 
   if (results.length > 0 && !results.some((item: TableData) => supportsMode(item, selectedMode.value))) {
     const fallbackMode = selectedMode.value === 'web' ? 'api' : 'web'
@@ -281,6 +287,14 @@ const onSelect = async (chatgptId: number | null) => {
 
 .mode-tags {
   display: flex;
+  gap: 6px;
+}
+
+.account-card__name {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
   gap: 6px;
 }
 

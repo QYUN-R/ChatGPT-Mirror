@@ -331,6 +331,8 @@ class RedemptionCodeSerializer(serializers.ModelSerializer):
 class PoolPolicySerializer(serializers.ModelSerializer):
     pool_name = serializers.CharField(source="pool.car_name", read_only=True)
     account_name = serializers.CharField(source="account.chatgpt_username", read_only=True)
+    account_plan_type = serializers.CharField(source="account.plan_type", read_only=True)
+    account_auth_status = serializers.BooleanField(source="account.auth_status", read_only=True)
     active_bindings = serializers.SerializerMethodField()
 
     class Meta:
@@ -341,6 +343,8 @@ class PoolPolicySerializer(serializers.ModelSerializer):
             "pool_name",
             "account_id",
             "account_name",
+            "account_plan_type",
+            "account_auth_status",
             "tier",
             "binding_limit",
             "enabled",

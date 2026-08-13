@@ -140,7 +140,10 @@ class Plan(TimestampedModel):
 
     def save(self, *args, **kwargs):
         self.full_clean()
-        return super().save(*args, **kwargs)
+        result = super().save(*args, **kwargs)
+        if self.pool_id:
+            ChatgptCar.objects.filter(pk=self.pool_id, is_commercial=False).update(is_commercial=True)
+        return result
 
     def __str__(self):
         return self.name
@@ -174,7 +177,10 @@ class PlanPool(TimestampedModel):
 
     def save(self, *args, **kwargs):
         self.full_clean()
-        return super().save(*args, **kwargs)
+        result = super().save(*args, **kwargs)
+        if self.pool_id:
+            ChatgptCar.objects.filter(pk=self.pool_id, is_commercial=False).update(is_commercial=True)
+        return result
 
 
 class PlanOffer(TimestampedModel):
@@ -522,7 +528,10 @@ class PoolAccountPolicy(TimestampedModel):
 
     def save(self, *args, **kwargs):
         self.full_clean()
-        return super().save(*args, **kwargs)
+        result = super().save(*args, **kwargs)
+        if self.pool_id:
+            ChatgptCar.objects.filter(pk=self.pool_id, is_commercial=False).update(is_commercial=True)
+        return result
 
 
 class SupportContact(TimestampedModel):

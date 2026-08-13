@@ -87,7 +87,7 @@ const routes: RouteRecordRaw[] = [
         path: 'gptcar',
         name: 'GptCar',
         component: () => import('@/pages/account/gptcar.vue'),
-        meta: { title: '账号池', requiresAdmin: true }
+        meta: { title: '免费账号池', requiresAdmin: true }
       },
       {
         path: 'plans',
@@ -99,7 +99,7 @@ const routes: RouteRecordRaw[] = [
         path: 'pools',
         name: 'CommercialPools',
         component: () => import('@/pages/account/pools.vue'),
-        meta: { title: '商业号池', requiresAdmin: true }
+        meta: { title: '套餐号池', requiresAdmin: true }
       },
       {
         path: 'subscriptions',

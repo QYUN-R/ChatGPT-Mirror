@@ -3,7 +3,7 @@ import time
 import ipaddress
 
 from django.shortcuts import get_object_or_404
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
@@ -49,6 +49,8 @@ from app.billing.services import (
     complete_order,
     create_order,
     ensure_assignment,
+    sync_commercial_pool_accounts,
+    sync_commercial_account_membership,
     publish_announcement,
     reconcile_provider_order,
     refund_order,
@@ -83,7 +85,11 @@ class AdminPlanView(APIView):
                 many=True,
                 context={"admin": True, "include_archived": True},
             ).data,
-            "pools": list(ChatgptCar.objects.values("id", "car_name").order_by("car_name")),
+            "pools": list(
+                ChatgptCar.objects.filter(is_commercial=True)
+                .values("id", "car_name")
+                .order_by("car_name")
+            ),
         })
 
     def post(self, request):
@@ -102,6 +108,23 @@ class AdminPlanView(APIView):
             pools_by_id = {pool.id: pool for pool in requested_pools}
             if len(requested_pools) != len(requested_pool_ids):
                 raise ValidationError({"pool_ids": "部分关联号池不存在"})
+            legacy_bound_pool_ids = {
+                pool_id
+                for gptcar_list in User.objects.values_list("gptcar_list", flat=True)
+                for pool_id in (gptcar_list or [])
+            }
+            auto_convertible_pools = {
+                pool.id for pool in requested_pools
+                if not pool.is_commercial
+                and not (pool.gpt_account_list or [])
+                and pool.id not in legacy_bound_pool_ids
+            }
+            invalid_pool_ids = {
+                pool.id for pool in requested_pools
+                if not pool.is_commercial and pool.id not in auto_convertible_pools
+            }
+            if invalid_pool_ids:
+                raise ValidationError({"pool_ids": "套餐只能关联在套餐号池页面维护的商业号池"})
             requested_pool = pools_by_id[requested_pool_ids[0]]
             requested_tier = request.data.get("pool_tier")
             try:
@@ -114,6 +137,8 @@ class AdminPlanView(APIView):
             if min(user_limit, daily_quota, monthly_quota, sort_order) < 0:
                 raise ValidationError({"message": "套餐限额和排序不能小于 0"})
             with transaction.atomic():
+                if auto_convertible_pools:
+                    ChatgptCar.objects.filter(id__in=auto_convertible_pools).update(is_commercial=True)
                 plan = Plan.objects.select_for_update().filter(pk=request.data.get("id")).first() or Plan()
                 quotas_changed = (
                     not plan.pk
@@ -175,7 +200,9 @@ class AdminPlanView(APIView):
             try:
                 offer.save()
             except DjangoValidationError as exc:
-                raise ValidationError(exc.message_dict)
+                if hasattr(exc, "message_dict"):
+                    raise ValidationError(exc.message_dict)
+                raise ValidationError({"message": list(exc.messages)})
             return Response({"offer": PlanSerializer(offer.plan, context={"admin": True}).data})
         if action in ("archive_plan", "archive_offer"):
             model = Plan if action == "archive_plan" else PlanOffer
@@ -201,8 +228,38 @@ class AdminPoolView(APIView):
                 distinct=True,
             )
         )
+        policy_rows = PoolPolicySerializer(policies, many=True).data
+        policies_by_pool = {}
+        for row in policy_rows:
+            policies_by_pool.setdefault(row["pool_id"], []).append(row)
+        commercial_pools = []
+        for pool in ChatgptCar.objects.filter(is_commercial=True).order_by("car_name"):
+            rows = policies_by_pool.get(pool.id, [])
+            plan_tiers = set(
+                Plan.objects.filter(is_archived=False)
+                .filter(Q(pool=pool) | Q(pool_links__pool=pool, pool_links__is_active=True))
+                .values_list("pool_tier", flat=True)
+                .distinct()
+            )
+            policy_tiers = {row["tier"] for row in rows}
+            tier = next(iter(plan_tiers or policy_tiers), "STANDARD")
+            commercial_pools.append({
+                "id": pool.id,
+                "car_name": pool.car_name,
+                "remark": pool.remark,
+                "tier": tier,
+                "account_ids": [row["account_id"] for row in rows],
+                "account_count": len(rows),
+                "healthy_account_count": sum(
+                    1 for row in rows if row["enabled"] and row["health_status"] == "HEALTHY"
+                ),
+                "active_bindings": sum(row["active_bindings"] for row in rows),
+                "total_capacity": sum(row["binding_limit"] for row in rows if row["enabled"]),
+                "policies": rows,
+            })
         return Response({
-            "policies": PoolPolicySerializer(policies, many=True).data,
+            "policies": policy_rows,
+            "commercial_pools": commercial_pools,
             "pools": list(ChatgptCar.objects.values("id", "car_name").order_by("car_name")),
             "accounts": list(
                 ChatgptAccount.objects.filter(is_archived=False).values(
@@ -213,37 +270,117 @@ class AdminPoolView(APIView):
 
     def post(self, request):
         action = request.data.get("action") or "save_policy"
+        if action == "create_pool":
+            account_ids = request.data.get("account_ids") or []
+            if not account_ids:
+                raise ValidationError({"message": "新建套餐号池时请至少选择一个上游账号"})
+            pool_name = str(request.data.get("pool_name") or "").strip()
+            if not pool_name:
+                raise ValidationError({"message": "号池名称不能为空"})
+            if ChatgptCar.objects.filter(car_name=pool_name).exists():
+                raise ValidationError({"message": "号池名称已存在"})
+            try:
+                with transaction.atomic():
+                    pool = ChatgptCar.objects.create(
+                        car_name=pool_name,
+                        remark=str(request.data.get("remark") or "").strip()[:128],
+                        gpt_account_list=[],
+                        is_commercial=True,
+                        created_time=int(time.time()),
+                        updated_time=int(time.time()),
+                    )
+                    sync_commercial_pool_accounts(
+                        pool,
+                        tier=request.data.get("tier"),
+                        account_ids=account_ids,
+                        default_binding_limit=request.data.get("default_binding_limit", 5),
+                        apply_binding_limit=True,
+                        actor=request.user,
+                        ip_address=get_client_ip(request),
+                    )
+            except BillingError as exc:
+                admin_error(exc)
+            except IntegrityError:
+                raise ValidationError({"message": "号池名称已存在"})
+            except DjangoValidationError as exc:
+                if hasattr(exc, "message_dict"):
+                    raise ValidationError(exc.message_dict)
+                raise ValidationError({"message": list(exc.messages)})
+            return Response({"message": "套餐号池已创建", "pool_id": pool.id})
+        if action == "sync_pool_accounts":
+            pool = get_object_or_404(ChatgptCar, pk=request.data.get("pool_id"))
+            try:
+                sync_commercial_pool_accounts(
+                    pool,
+                    tier=request.data.get("tier"),
+                    account_ids=request.data.get("account_ids") or [],
+                    pool_name=request.data.get("pool_name"),
+                    remark=request.data.get("remark"),
+                    default_binding_limit=request.data.get("default_binding_limit", 5),
+                    apply_binding_limit=bool(request.data.get("apply_binding_limit", False)),
+                    actor=request.user,
+                    ip_address=get_client_ip(request),
+                )
+            except BillingError as exc:
+                admin_error(exc)
+            return Response({"message": "商业号池账号已保存"})
         if action == "save_policy":
             account = get_object_or_404(ChatgptAccount, pk=request.data.get("account_id"), is_archived=False)
             policy = PoolAccountPolicy.objects.filter(account=account).first() or PoolAccountPolicy(account=account)
+            previous_pool_id = policy.pool_id
+            previous_tier = policy.tier
             policy.pool = get_object_or_404(ChatgptCar, pk=request.data.get("pool_id"))
             policy.tier = request.data.get("tier")
             policy.binding_limit = int(request.data.get("binding_limit") or 0)
             policy.enabled = bool(request.data.get("enabled", True))
             policy.health_status = request.data.get("health_status") or "HEALTHY"
+            active_bindings = AccountAssignment.objects.filter(account=account, active=True).count()
+            if active_bindings and (
+                (previous_pool_id and previous_pool_id != policy.pool_id)
+                or (previous_tier and previous_tier != policy.tier)
+            ):
+                raise ValidationError({
+                    "message": "该账号仍有用户正在使用，不能直接跨号池或跨等级移动，请先迁移用户",
+                    "code": "account_in_use",
+                })
+            if policy.binding_limit < active_bindings:
+                raise ValidationError({
+                    "message": f"该账号当前已有 {active_bindings} 人使用，绑定上限不能低于当前人数",
+                    "code": "binding_limit_below_usage",
+                })
             try:
                 policy.save()
             except Exception as exc:
                 raise ValidationError({"message": str(exc)})
-            for pool in ChatgptCar.objects.all():
-                account_ids = [item for item in (pool.gpt_account_list or []) if item != account.id]
-                if pool.id == policy.pool_id and account.id not in account_ids:
-                    account_ids.append(account.id)
-                if account_ids != (pool.gpt_account_list or []):
-                    pool.gpt_account_list = account_ids
-                    pool.updated_time = int(time.time())
-                    pool.save(update_fields=["gpt_account_list", "updated_time"])
+            sync_commercial_account_membership(account, policy.pool if policy.enabled else None)
             return Response({"policy": PoolPolicySerializer(policy).data})
         if action == "disable_policy":
             policy = get_object_or_404(PoolAccountPolicy, pk=request.data.get("id"))
             policy.enabled = False
             policy.health_status = "DISABLED"
             policy.save(update_fields=["enabled", "health_status", "updated_at"])
-            pool = policy.pool
-            pool.gpt_account_list = [item for item in (pool.gpt_account_list or []) if item != policy.account_id]
-            pool.updated_time = int(time.time())
-            pool.save(update_fields=["gpt_account_list", "updated_time"])
+            sync_commercial_account_membership(policy.account, None)
             return Response({"message": "账号策略已停用"})
+        if action == "delete_policy":
+            policy = get_object_or_404(
+                PoolAccountPolicy.objects.select_related("account", "pool"),
+                pk=request.data.get("id"),
+            )
+            if AccountAssignment.objects.filter(account=policy.account, active=True).exists():
+                raise ValidationError({"message": "该策略仍有用户正在使用，请先迁移用户后再删除"})
+            account = policy.account
+            policy_id = policy.id
+            policy.delete()
+            sync_commercial_account_membership(account, None)
+            audit(
+                "pool_policy.deleted",
+                actor=request.user,
+                target_type="PoolAccountPolicy",
+                target_id=policy_id,
+                detail={"account_id": account.id},
+                ip_address=get_client_ip(request),
+            )
+            return Response({"message": "账号策略已删除"})
         raise ValidationError({"message": "未知操作"})
 
 

@@ -8,6 +8,7 @@ class ChatgptCar(models.Model):
     car_name = models.CharField(unique=True, max_length=32)
     remark = models.CharField(max_length=128, blank=True, verbose_name="备注")
     gpt_account_list = models.JSONField(default=list)
+    is_commercial = models.BooleanField(default=False, db_index=True, verbose_name="套餐号池")
     created_time = models.IntegerField(db_index=True, blank=True, verbose_name="创建时间")
     updated_time = models.IntegerField(db_index=True, blank=True, verbose_name="最后修改时间")
 
