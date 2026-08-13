@@ -2,7 +2,7 @@ import time
 from datetime import datetime
 
 from django.db import IntegrityError, transaction
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.utils import timezone
 from django.middleware.csrf import get_token, rotate_token
 from rest_framework import generics
@@ -11,30 +11,45 @@ from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from app.accounts.models import EmailVerificationChallenge, User, VisitLog
+from app.accounts.models import EmailVerificationChallenge, User, UserDeviceSession, VisitLog
 from app.accounts.serializers import ShowVisitLogModelSerializer, AddUserAccountSerializer, UserBindChatGPTSerializer, \
     ShowUserAccountModelSerializer, BatchModelLimitSerializer, BatchUserActionSerializer, ChangePasswordSerializer
-from app.accounts.authentication import set_auth_cookie
+from app.accounts.authentication import (
+    active_device_sessions,
+    clear_auth_cookie,
+    device_subject,
+    get_device_session,
+    issue_device_session,
+    revoke_all_device_sessions,
+    set_auth_cookie,
+)
 from rest_framework.authtoken.models import Token
 from app.chatgpt.models import ChatgptAccount, ChatgptCar
 from app.page import DefaultPageNumberPagination
 from app.settings import ADMIN_USERNAME
 from app.utils import get_client_ip, get_request_subject, req_gateway
 from app.accounts.email_auth import has_verified_email, issue_binding_ticket
+from app.accounts.model_limits import normalize_model_limits
 from app.accounts.views.login import issue_user_token
 from app.billing.exceptions import BillingError
 from app.billing.services import audit, has_managed_subscription, managed_account_options, resolve_managed_account
+from app.accounts.device_policy import (
+    effective_device_policy,
+    enforce_device_policy_with_gateway,
+)
 
 
 def revoke_user_sessions(user):
     Token.objects.filter(user=user).delete()
-    try:
-        req_gateway("post", "/api/logout", json={"user_name": user.username})
-    except ValidationError:
-        pass
+    subjects = revoke_all_device_sessions(user)
+    for subject in subjects or [user.username]:
+        try:
+            req_gateway("post", "/api/logout", json={"user_name": subject})
+        except ValidationError:
+            pass
 
 
-def quota_snapshot(user):
+def quota_snapshot(user, request=None):
     now = timezone.now()
     day_start = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
     month_start = int(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
@@ -46,7 +61,7 @@ def quota_snapshot(user):
     ).count()
     try:
         remote = req_gateway("post", "/api/get-user-quota-usage", json={
-            "user_name": get_request_subject_from_user(user),
+            "user_name": get_request_subject(request) if request else get_request_subject_from_user(user),
             "day_start": day_start,
             "month_start": month_start,
         })
@@ -65,7 +80,7 @@ def get_request_subject_from_user(user):
 
 
 def normalized_model_limits(user):
-    return [item for item in (user.model_limit or []) if isinstance(item, str)]
+    return normalize_model_limits(user.model_limit)
 
 
 class GetMirrorToken(APIView):
@@ -251,7 +266,20 @@ class UserAccountView(generics.ListCreateAPIView):
     permission_classes = (IsAuthenticated, IsAdminUser)
 
     def get(self, request, *args, **kwargs):
-        queryset = User.objects.select_related("billing_subscription__plan").order_by("-id").all()
+        queryset = (
+            User.objects.select_related("billing_subscription__plan")
+            .annotate(
+                active_device_count=Count(
+                    "device_sessions",
+                    filter=Q(
+                        device_sessions__revoked_at__isnull=True,
+                        device_sessions__expires_at__gt=timezone.now(),
+                    ),
+                    distinct=True,
+                )
+            )
+            .order_by("-id")
+        )
         query = str(request.query_params.get("q") or "").strip()
         if query:
             queryset = queryset.filter(
@@ -311,6 +339,17 @@ class UserAccountView(generics.ListCreateAPIView):
         user.remark = serializer.data["remark"]
         user.daily_quota = serializer.data.get("daily_quota", 0)
         user.monthly_quota = serializer.data.get("monthly_quota", 0)
+        previous_policy = effective_device_policy(user) if not created else None
+        user.multi_device_enabled = serializer.validated_data.get(
+            "multi_device_enabled", user.multi_device_enabled
+        )
+        user.device_policy_managed_by_plan = serializer.validated_data.get(
+            "device_policy_managed_by_plan", user.device_policy_managed_by_plan
+        )
+        user.device_limit = serializer.validated_data.get("device_limit", user.device_limit)
+        user.new_device_verification_enabled = serializer.validated_data.get(
+            "new_device_verification_enabled", user.new_device_verification_enabled
+        )
         if "force_chat_mode" in serializer.validated_data:
             user.force_chat_mode = serializer.validated_data["force_chat_mode"]
         try:
@@ -350,6 +389,8 @@ class UserAccountView(generics.ListCreateAPIView):
         )
         if credentials_changed or access_revoked:
             revoke_user_sessions(user)
+        elif previous_policy != effective_device_policy(user):
+            enforce_device_policy_with_gateway(user)
 
         return Response({"message": "添加成功"})
 
@@ -402,21 +443,51 @@ class BatchUserActionView(APIView):
     def post(self, request):
         serializer = BatchUserActionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        queryset = User.objects.filter(id__in=serializer.validated_data["user_id_list"]).exclude(
-            username=ADMIN_USERNAME
-        )
+        queryset = User.objects.filter(id__in=serializer.validated_data["user_id_list"]).exclude(username=ADMIN_USERNAME)
         action = serializer.validated_data["action"]
         users = list(queryset)
         if action == "delete":
             for user in users:
                 revoke_user_sessions(user)
             changed, _ = queryset.delete()
-        else:
+        elif action in ("activate", "deactivate"):
             active = action == "activate"
             changed = queryset.update(is_active=active)
             if not active:
                 for user in users:
                     revoke_user_sessions(user)
+        else:
+            with transaction.atomic():
+                users = list(queryset.select_for_update())
+                if action == "device_follow_plan":
+                    for user in users:
+                        user.device_policy_managed_by_plan = True
+                        if "new_device_verification_enabled" in serializer.validated_data:
+                            user.new_device_verification_enabled = serializer.validated_data[
+                                "new_device_verification_enabled"
+                            ]
+                        user.save(update_fields=[
+                            "device_policy_managed_by_plan",
+                            "new_device_verification_enabled",
+                        ])
+                else:
+                    for user in users:
+                        user.device_policy_managed_by_plan = False
+                        user.multi_device_enabled = serializer.validated_data["multi_device_enabled"]
+                        user.device_limit = serializer.validated_data["device_limit"]
+                        if "new_device_verification_enabled" in serializer.validated_data:
+                            user.new_device_verification_enabled = serializer.validated_data[
+                                "new_device_verification_enabled"
+                            ]
+                        user.save(update_fields=[
+                            "device_policy_managed_by_plan",
+                            "multi_device_enabled",
+                            "device_limit",
+                            "new_device_verification_enabled",
+                        ])
+            for user in users:
+                enforce_device_policy_with_gateway(user)
+            changed = len(users)
         return Response({"message": "批量操作完成", "changed": changed})
 
 
@@ -430,12 +501,87 @@ class CurrentUserView(APIView):
             "email": request.user.email,
             "email_verified": has_verified_email(request.user),
             "is_admin": bool(request.user.is_staff or request.user.is_superuser),
-            "quota": quota_snapshot(request.user),
+            "multi_device_enabled": effective_device_policy(request.user)["enabled"],
+            "device_policy": effective_device_policy(request.user),
+            "active_device_count": active_device_sessions(request.user).count(),
+            "quota": quota_snapshot(request.user, request=request),
             "csrf_token": get_token(request),
         }
         if not result["email_verified"]:
             result["email_binding_ticket"] = issue_binding_ticket(request.user)
         return Response(result)
+
+
+def serialize_device_session(session, *, current_session_id=None):
+    return {
+        "id": session.id,
+        "is_current": session.id == current_session_id,
+        "is_primary": session.is_primary,
+        "device_type": session.device_type or "desktop",
+        "browser_name": session.browser_name or "其他浏览器",
+        "os_name": session.os_name or "其他系统",
+        "ip_address": str(session.ip_address or ""),
+        "verified_at": session.verified_at,
+        "last_seen_at": session.last_seen_at,
+        "created_at": session.created_at,
+        "expires_at": session.expires_at,
+    }
+
+
+class DeviceSessionView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    @staticmethod
+    def target_user(request):
+        user_id = request.query_params.get("user_id") or request.data.get("user_id")
+        if not user_id:
+            return request.user
+        if not (request.user.is_staff or request.user.is_superuser):
+            raise ValidationError({"message": "没有权限查看其他用户的设备"})
+        target = User.objects.filter(pk=user_id).first()
+        if not target:
+            raise ValidationError({"message": "用户不存在"})
+        return target
+
+    def get(self, request):
+        target_user = self.target_user(request)
+        current = get_device_session(request, request.user, touch=False)
+        sessions = active_device_sessions(target_user).order_by("-is_primary", "-last_seen_at", "-id")
+        return Response({
+            "username": target_user.username,
+            "policy": effective_device_policy(target_user),
+            "sessions": [
+                serialize_device_session(
+                    item,
+                    current_session_id=getattr(current, "id", None) if target_user == request.user else None,
+                )
+                for item in sessions
+            ],
+        })
+
+    def delete(self, request):
+        target_user = self.target_user(request)
+        session = UserDeviceSession.objects.filter(
+            pk=request.data.get("session_id"),
+            user=target_user,
+            revoked_at__isnull=True,
+            expires_at__gt=timezone.now(),
+        ).first()
+        if not session:
+            raise ValidationError({"message": "设备会话不存在或已失效"})
+        current = get_device_session(request, request.user, touch=False) if target_user == request.user else None
+        session.revoked_at = timezone.now()
+        session.save(update_fields=["revoked_at"])
+        try:
+            req_gateway("post", "/api/logout", json={"user_name": device_subject(target_user, session)})
+        except ValidationError:
+            pass
+        response = Response({"message": "设备已下线", "current_device_revoked": session == current})
+        if session == current:
+            if not active_device_sessions(request.user).exists() and request.auth:
+                Token.objects.filter(key=str(request.auth)).delete()
+            clear_auth_cookie(response)
+        return response
 
 
 class ChangePasswordView(APIView):
@@ -446,18 +592,31 @@ class ChangePasswordView(APIView):
             data=request.data, context={"user": request.user}
         )
         serializer.is_valid(raise_exception=True)
-        if not request.user.check_password(serializer.validated_data["current_password"]):
-            raise ValidationError({"current_password": "当前密码不正确"})
-        request.user.set_password(serializer.validated_data["new_password"])
-        request.user.save(update_fields=["password"])
-        revoke_user_sessions(request.user)
-        token = issue_user_token(request.user, rotate=True)
+        with transaction.atomic():
+            user = User.objects.select_for_update().get(pk=request.user.pk)
+            if not user.check_password(serializer.validated_data["current_password"]):
+                raise ValidationError({"current_password": "当前密码不正确"})
+            user.set_password(serializer.validated_data["new_password"])
+            user.save(update_fields=["password"])
+            Token.objects.filter(user=user).delete()
+            revoked_subjects = revoke_all_device_sessions(user)
+            token = issue_user_token(user)
+            device_token, device_id, _device_session, _ = issue_device_session(
+                request, user, verified=True
+            )
+
+        for subject in revoked_subjects or [user.username]:
+            try:
+                req_gateway("post", "/api/logout", json={"user_name": subject})
+            except ValidationError:
+                pass
+        request.user = user
         rotate_token(request)
         response = Response({
             "message": "密码修改成功，其他会话已退出",
             "csrf_token": get_token(request),
         })
-        set_auth_cookie(response, token)
+        set_auth_cookie(response, token, device_token, device_id)
         return response
 
 
@@ -465,7 +624,7 @@ class QuotaView(APIView):
     permission_classes = (IsAuthenticated,)
 
     def get(self, request):
-        return Response(quota_snapshot(request.user))
+        return Response(quota_snapshot(request.user, request=request))
 
 
 class OperationsOverviewView(APIView):

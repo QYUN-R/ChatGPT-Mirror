@@ -9,9 +9,26 @@ services:
       - frontend-node-modules:/workspace/frontend/node_modules
 
   chatgpt-mirror:
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    pids_limit: 512
+    stop_grace_period: 30s
     volumes:
       - ./data:/app/data
       - ./gateway/static:/app/static:ro
+
+  cfbypass:
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    # The helper runs a browser process. Leave room for normal challenge work
+    # while preventing an unexpected child-process fan-out from taking down
+    # the dedicated application host.
+    pids_limit: 512
+    stop_grace_period: 30s
 
   django:
     image: chatgpt-mirror-commercial-backend:local
@@ -19,6 +36,13 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
+      # Four workers with four request threads use the dedicated 4-core host
+      # without creating an unbounded process pool. PERF_* values remain
+      # overridable from the production .env file.
+      WEB_CONCURRENCY: "${PERF_WEB_CONCURRENCY:-4}"
+      WEB_THREADS: "${PERF_WEB_THREADS:-4}"
+      WEB_MAX_REQUESTS: "${PERF_WEB_MAX_REQUESTS:-2000}"
+      WEB_MAX_REQUESTS_JITTER: "${PERF_WEB_MAX_REQUESTS_JITTER:-200}"
       BILLING_ENABLED: "${BILLING_ENABLED:-true}"
       BILLING_ENFORCE_SUBSCRIPTION: "${BILLING_ENFORCE_SUBSCRIPTION:-false}"
       BILLING_MOCK_PAYMENTS: "${BILLING_MOCK_PAYMENTS:-false}"
@@ -39,6 +63,12 @@ services:
       DJANGO_CACHE_URL: "${DJANGO_CACHE_URL:-redis://redis:6379/2}"
       EMAIL_HOST_PASSWORD_FILE: "${EMAIL_HOST_PASSWORD_FILE:-/run/secrets/qq_smtp_password}"
       PUBLIC_SITE_URL: "${PUBLIC_SITE_URL:-https://www.tuwugpt.com}"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    pids_limit: 512
+    stop_grace_period: 30s
     depends_on:
       redis:
         condition: service_healthy
@@ -75,6 +105,11 @@ services:
     volumes:
       - ./backend/logs:/app/backend/logs
       - ./backend/db:/app/backend/db
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    pids_limit: 256
     secrets:
       - source: qq_smtp_password
         target: qq_smtp_password
@@ -114,6 +149,11 @@ services:
     volumes:
       - ./backend/logs:/app/backend/logs
       - ./backend/db:/app/backend/db
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    pids_limit: 128
     secrets:
       - source: qq_smtp_password
         target: qq_smtp_password
@@ -152,6 +192,11 @@ services:
     volumes:
       - ./backend/logs:/app/backend/logs
       - ./backend/db:/app/backend/db
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    pids_limit: 128
     depends_on:
       redis:
         condition: service_healthy

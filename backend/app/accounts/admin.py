@@ -14,6 +14,7 @@ class UserAdmin(admin.ModelAdmin):
         "is_active",
         "username",
         "isolated_session",
+        "multi_device_enabled",
         "remark",
         "last_login",
     )

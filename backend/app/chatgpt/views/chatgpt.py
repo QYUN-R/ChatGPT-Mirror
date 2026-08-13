@@ -15,6 +15,7 @@ from app.page import DefaultPageNumberPagination
 from app.settings import CHATGPT_GATEWAY_URL
 from app.utils import get_request_subject, redact_sensitive_data, save_visit_log, req_gateway
 from app.accounts.models import User
+from app.accounts.model_limits import normalize_model_limits
 from rest_framework.exceptions import ValidationError
 from django.utils import timezone
 
@@ -281,9 +282,7 @@ class ChatGPTLoginView(APIView):
             "extra_cookies": chatgpt.extra_cookies,
             "login_mode": login_mode,
             "isolated_session": request.user.isolated_session,
-            "limits": [
-                item for item in (request.user.model_limit or []) if isinstance(item, str)
-            ],
+            "limits": normalize_model_limits(request.user.model_limit),
             "proxy_node_id": chatgpt.proxy_node_id,
             "daily_quota": request.user.daily_quota,
             "monthly_quota": request.user.monthly_quota,

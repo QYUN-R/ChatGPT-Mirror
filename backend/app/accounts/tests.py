@@ -18,10 +18,19 @@ from app.accounts.models import (
     EmailVerificationChallenge,
     EmailVerificationPurpose,
     User,
+    UserDeviceSession,
     VisitLog,
 )
-from app.accounts.views import UserAccountView, VisitLogView, ChangePasswordView
-from app.accounts.authentication import AUTH_COOKIE_NAME, ExpiringCookieTokenAuthentication
+from app.accounts.views import BatchUserActionView, UserAccountView, VisitLogView, ChangePasswordView
+from app.accounts.authentication import (
+    AUTH_COOKIE_NAME,
+    DEVICE_COOKIE_NAME,
+    DEVICE_ID_COOKIE_NAME,
+    ExpiringCookieTokenAuthentication,
+)
+from app.accounts.device_policy import effective_device_policy
+from app.accounts.model_limits import normalize_model_limits
+from app.utils import get_request_subject
 from app.accounts.captcha import (
     CAPTCHA_ALPHABET,
     CAPTCHA_LENGTH,
@@ -38,6 +47,7 @@ from app.accounts.views.login import (
     AccountRegister,
     EmailBindingConfirmView,
     EmailChangeConfirmView,
+    DeviceLoginVerificationConfirmView,
     PasswordResetConfirmView,
     UserFreeLoginView,
     LocalCaptchaView,
@@ -56,6 +66,52 @@ class SecurityRegressionTests(TestCase):
     def test_force_chat_mode_is_enabled_for_new_users(self):
         user = User.objects.create_user(username="work-mode-user", password="Strong-password-123!")
         self.assertTrue(user.force_chat_mode)
+
+    def test_model_limits_drop_object_values_and_legacy_placeholders(self):
+        self.assertEqual(
+            normalize_model_limits([
+                " gpt-5 ",
+                {"value": "gpt-4o"},
+                "[object Object]",
+                "gpt-5",
+                "",
+                "gpt-4o",
+            ]),
+            ["gpt-5", "gpt-4o"],
+        )
+
+    def test_user_serializer_masks_invalid_legacy_model_limits(self):
+        from app.accounts.serializers import ShowUserAccountModelSerializer
+
+        user = User.objects.create_user(username="legacy-model-user", password="Strong-password-123!")
+        user.model_limit = ["[object Object]", {"label": "GPT"}, "gpt-5"]
+        user.save(update_fields=["model_limit"])
+
+        self.assertEqual(ShowUserAccountModelSerializer(user).data["model_limit"], ["gpt-5"])
+
+    def test_user_update_rejects_object_model_limit_values(self):
+        admin = User.objects.create_superuser(username="model-limit-admin", password="Strong-password-123!")
+        user = User.objects.create_user(username="model-limit-user", password="Strong-password-123!")
+        request = self.factory.post(
+            "/0x/user",
+            {
+                "username": user.username,
+                "email": "",
+                "is_active": True,
+                "isolated_session": True,
+                "gptcar_list": [],
+                "model_limit": [{"value": "gpt-5"}],
+                "remark": "",
+                "daily_quota": 0,
+                "monthly_quota": 0,
+            },
+            format="json",
+        )
+        force_authenticate(request, user=admin)
+
+        response = UserAccountView.as_view()(request)
+
+        self.assertEqual(response.status_code, 400)
 
     def test_empty_account_pool_is_fail_closed(self):
         self.assertFalse(ChatgptAccount.get_by_gptcar_list([]).exists())
@@ -125,6 +181,325 @@ class SecurityRegressionTests(TestCase):
         response = AccountLogin.as_view()(request)
 
         self.assertEqual(response.status_code, 400)
+
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
+    @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
+    @patch("app.accounts.views.login.req_gateway", return_value={"message": "ok"})
+    def test_single_device_login_revokes_previous_device(self, _req_gateway):
+        user = User.objects.create_user(
+            username="single-device-user",
+            email="single-device-user@qq.com",
+            email_verified_at=timezone.now(),
+            password="Strong-password-123!",
+            device_policy_managed_by_plan=False,
+            multi_device_enabled=False,
+            new_device_verification_enabled=False,
+        )
+        first_client = APIClient()
+        second_client = APIClient()
+
+        first_login = first_client.post(
+            "/0x/user/login",
+            {"identifier": user.email, "password": "Strong-password-123!"},
+            format="json",
+        )
+        second_login = second_client.post(
+            "/0x/user/login",
+            {"identifier": user.email, "password": "Strong-password-123!"},
+            format="json",
+        )
+
+        self.assertEqual(first_login.status_code, 200)
+        self.assertEqual(second_login.status_code, 200)
+        self.assertNotEqual(
+            first_login.cookies[DEVICE_COOKIE_NAME].value,
+            second_login.cookies[DEVICE_COOKIE_NAME].value,
+        )
+        self.assertEqual(first_client.get("/0x/user/me").status_code, 401)
+        self.assertEqual(second_client.get("/0x/user/me").status_code, 200)
+        self.assertEqual(
+            UserDeviceSession.objects.filter(user=user, revoked_at__isnull=True).count(),
+            1,
+        )
+
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
+    @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
+    @patch("app.accounts.views.login.req_gateway", return_value={"message": "ok"})
+    def test_multi_device_login_keeps_both_devices_and_uses_distinct_subjects(self, _req_gateway):
+        user = User.objects.create_user(
+            username="multi-device-user",
+            email="multi-device-user@qq.com",
+            email_verified_at=timezone.now(),
+            password="Strong-password-123!",
+            device_policy_managed_by_plan=False,
+            multi_device_enabled=True,
+            new_device_verification_enabled=False,
+        )
+        first_client = APIClient()
+        second_client = APIClient()
+
+        first_login = first_client.post(
+            "/0x/user/login",
+            {"identifier": user.email, "password": "Strong-password-123!"},
+            format="json",
+        )
+        second_login = second_client.post(
+            "/0x/user/login",
+            {"identifier": user.email, "password": "Strong-password-123!"},
+            format="json",
+        )
+
+        self.assertEqual(first_login.status_code, 200)
+        self.assertEqual(second_login.status_code, 200)
+        self.assertEqual(first_client.get("/0x/user/me").status_code, 200)
+        self.assertEqual(second_client.get("/0x/user/me").status_code, 200)
+        sessions = list(
+            UserDeviceSession.objects.filter(user=user, revoked_at__isnull=True)
+        )
+        self.assertEqual(len(sessions), 2)
+        self.assertNotEqual(sessions[0].subject_id, sessions[1].subject_id)
+
+        first_request = self.factory.get(
+            "/0x/user/get-mirror-token",
+            HTTP_COOKIE=f"{DEVICE_COOKIE_NAME}={first_client.cookies[DEVICE_COOKIE_NAME].value}",
+        )
+        first_request.user = user
+        second_request = self.factory.get(
+            "/0x/user/get-mirror-token",
+            HTTP_COOKIE=f"{DEVICE_COOKIE_NAME}={second_client.cookies[DEVICE_COOKIE_NAME].value}",
+        )
+        second_request.user = user
+        self.assertNotEqual(
+            get_request_subject(first_request),
+            get_request_subject(second_request),
+        )
+
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
+    @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
+    @patch("app.accounts.views.login.req_gateway", return_value={"message": "ok"})
+    def test_multi_device_logout_only_revokes_current_device(self, _req_gateway):
+        user = User.objects.create_user(
+            username="multi-device-logout",
+            email="multi-device-logout@qq.com",
+            email_verified_at=timezone.now(),
+            password="Strong-password-123!",
+            device_policy_managed_by_plan=False,
+            multi_device_enabled=True,
+            new_device_verification_enabled=False,
+        )
+        first_client = APIClient()
+        second_client = APIClient()
+        credentials = {
+            "identifier": user.email,
+            "password": "Strong-password-123!",
+        }
+        self.assertEqual(first_client.post("/0x/user/login", credentials, format="json").status_code, 200)
+        self.assertEqual(second_client.post("/0x/user/login", credentials, format="json").status_code, 200)
+
+        self.assertEqual(first_client.post("/0x/user/logout", {}, format="json").status_code, 200)
+        self.assertEqual(first_client.get("/0x/user/me").status_code, 401)
+        self.assertEqual(second_client.get("/0x/user/me").status_code, 200)
+        self.assertEqual(
+            UserDeviceSession.objects.filter(user=user, revoked_at__isnull=True).count(),
+            1,
+        )
+
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
+    @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
+    @patch("app.accounts.views.login.req_gateway", return_value={"message": "ok"})
+    def test_same_browser_reuses_stable_device_identity_after_logout(self, _req_gateway):
+        user = User.objects.create_user(
+            username="stable-device-user",
+            email="stable-device-user@qq.com",
+            email_verified_at=timezone.now(),
+            password="Strong-password-123!",
+            device_policy_managed_by_plan=False,
+            multi_device_enabled=True,
+            new_device_verification_enabled=False,
+        )
+        client = APIClient()
+        credentials = {"identifier": user.email, "password": "Strong-password-123!"}
+        first = client.post("/0x/user/login", credentials, format="json")
+        self.assertEqual(first.status_code, 200)
+        device_id = client.cookies[DEVICE_ID_COOKIE_NAME].value
+        first_session = UserDeviceSession.objects.get(user=user)
+
+        self.assertEqual(client.post("/0x/user/logout", {}, format="json").status_code, 200)
+        self.assertEqual(client.cookies[DEVICE_ID_COOKIE_NAME].value, device_id)
+        second = client.post("/0x/user/login", credentials, format="json")
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(UserDeviceSession.objects.filter(user=user).count(), 1)
+        first_session.refresh_from_db()
+        self.assertIsNone(first_session.revoked_at)
+
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
+    @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
+    def test_new_device_requires_email_verification(self):
+        user = User.objects.create_user(
+            username="verify-device-user",
+            email="verify-device-user@qq.com",
+            email_verified_at=timezone.now(),
+            password="Strong-password-123!",
+            new_device_verification_enabled=True,
+        )
+        client = APIClient()
+        login = client.post(
+            "/0x/user/login",
+            {"identifier": user.email, "password": "Strong-password-123!"},
+            format="json",
+        )
+        self.assertEqual(login.status_code, 200)
+        self.assertFalse(login.data["authenticated"])
+        self.assertTrue(login.data["device_verification_required"])
+        self.assertIn(DEVICE_ID_COOKIE_NAME, login.cookies)
+
+    @override_settings(DEFAULT_MULTI_DEVICE_ENABLED=True, DEFAULT_DEVICE_LIMIT=3)
+    def test_device_policy_user_override_and_restore_system_default(self):
+        user = User.objects.create_user(username="policy-user", password="Strong-password-123!")
+        self.assertEqual(effective_device_policy(user)["limit"], 3)
+        self.assertEqual(effective_device_policy(user)["source"], "system")
+
+        user.device_policy_managed_by_plan = False
+        user.multi_device_enabled = True
+        user.device_limit = 7
+        user.save(update_fields=["device_policy_managed_by_plan", "multi_device_enabled", "device_limit"])
+        self.assertEqual(effective_device_policy(user)["limit"], 7)
+        self.assertEqual(effective_device_policy(user)["source"], "user")
+
+    @override_settings(DEFAULT_MULTI_DEVICE_ENABLED=True, DEFAULT_DEVICE_LIMIT=3)
+    def test_active_plan_policy_and_user_override_precedence(self):
+        from app.billing.models import Plan, PoolTier, Subscription, SubscriptionStatus
+        from app.chatgpt.models import ChatgptCar
+
+        pool = ChatgptCar.objects.create(
+            car_name="device-policy-pool",
+            gpt_account_list=[],
+            is_commercial=True,
+            created_time=1,
+            updated_time=1,
+        )
+        plan = Plan.objects.create(
+            code="device-policy-plan",
+            name="设备策略套餐",
+            pool=pool,
+            pool_tier=PoolTier.STANDARD,
+            multi_device_enabled=True,
+            device_limit=2,
+        )
+        user = User.objects.create_user(username="plan-policy-user", password="Strong-password-123!")
+        Subscription.objects.create(
+            user=user,
+            plan=plan,
+            status=SubscriptionStatus.ACTIVE,
+            starts_at=timezone.now(),
+            ends_at=timezone.now() + timedelta(days=30),
+        )
+        self.assertEqual(effective_device_policy(user)["limit"], 2)
+        self.assertEqual(effective_device_policy(user)["source"], "plan")
+
+        user.device_policy_managed_by_plan = False
+        user.multi_device_enabled = True
+        user.device_limit = 6
+        user.save(update_fields=["device_policy_managed_by_plan", "multi_device_enabled", "device_limit"])
+        self.assertEqual(effective_device_policy(user)["limit"], 6)
+        self.assertEqual(effective_device_policy(user)["source"], "user")
+
+    @patch("app.accounts.views.req_gateway", return_value={"message": "ok"})
+    def test_admin_batch_device_override_and_restore_follow_plan(self, _req_gateway):
+        admin = User.objects.create_superuser(username="device-batch-admin", password="Strong-password-123!")
+        first = User.objects.create_user(username="device-batch-one", password="Strong-password-123!")
+        second = User.objects.create_user(username="device-batch-two", password="Strong-password-123!")
+        factory = APIRequestFactory()
+
+        override_request = factory.post(
+            "/0x/user/batch",
+            {
+                "user_id_list": [first.id, second.id],
+                "action": "device_override",
+                "multi_device_enabled": True,
+                "device_limit": 5,
+                "new_device_verification_enabled": False,
+            },
+            format="json",
+        )
+        force_authenticate(override_request, user=admin)
+        response = BatchUserActionView.as_view()(override_request)
+        self.assertEqual(response.status_code, 200)
+        for user in (first, second):
+            user.refresh_from_db()
+            self.assertFalse(user.device_policy_managed_by_plan)
+            self.assertEqual(user.device_limit, 5)
+            self.assertFalse(user.new_device_verification_enabled)
+
+        follow_request = factory.post(
+            "/0x/user/batch",
+            {
+                "user_id_list": [first.id, second.id],
+                "action": "device_follow_plan",
+                "new_device_verification_enabled": True,
+            },
+            format="json",
+        )
+        force_authenticate(follow_request, user=admin)
+        response = BatchUserActionView.as_view()(follow_request)
+        self.assertEqual(response.status_code, 200)
+        for user in (first, second):
+            user.refresh_from_db()
+            self.assertTrue(user.device_policy_managed_by_plan)
+            self.assertTrue(user.new_device_verification_enabled)
+
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
+    @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
+    @patch("app.accounts.views.login.req_gateway", return_value={"message": "ok"})
+    def test_default_device_limit_rejects_fourth_browser(self, _req_gateway):
+        user = User.objects.create_user(
+            username="device-limit-user",
+            email="device-limit-user@qq.com",
+            email_verified_at=timezone.now(),
+            password="Strong-password-123!",
+            new_device_verification_enabled=False,
+        )
+        credentials = {"identifier": user.email, "password": "Strong-password-123!"}
+        clients = [APIClient() for _ in range(4)]
+        for client in clients[:3]:
+            self.assertEqual(client.post("/0x/user/login", credentials, format="json").status_code, 200)
+        rejected = clients[3].post("/0x/user/login", credentials, format="json")
+        self.assertNotEqual(rejected.status_code, 200)
+        self.assertIn("3 台设备上限", str(rejected.data))
+
+    @patch("app.accounts.views.login.req_gateway", return_value={"message": "ok"})
+    @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
+    @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
+    def test_device_email_code_completes_login(self, _req_gateway):
+        user = User.objects.create_user(
+            username="device-confirm-user",
+            email="device-confirm-user@qq.com",
+            email_verified_at=timezone.now(),
+            password="Strong-password-123!",
+        )
+        client = APIClient()
+        login = client.post(
+            "/0x/user/login",
+            {"identifier": user.email, "password": "Strong-password-123!"},
+            format="json",
+        )
+        EmailVerificationChallenge.objects.create(
+            user=user,
+            email=user.email,
+            purpose=EmailVerificationPurpose.DEVICE_LOGIN,
+            code_hash=make_password("123456"),
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+        confirmed = client.post(
+            "/0x/user/device-login/confirm",
+            {"device_ticket": login.data["device_ticket"], "verification_code": "123456"},
+            format="json",
+        )
+        self.assertEqual(confirmed.status_code, 200)
+        self.assertTrue(confirmed.data["authenticated"])
+        self.assertIn(DEVICE_COOKIE_NAME, confirmed.cookies)
+        self.assertEqual(client.get("/0x/user/me").status_code, 200)
 
     def test_invalid_auth_cookie_does_not_block_public_version_config(self):
         client = APIClient()

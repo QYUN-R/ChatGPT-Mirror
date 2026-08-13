@@ -17,7 +17,7 @@
           class="login-form"
           @submit="onSubmit"
         >
-          <div v-if="isLogin" class="form-field">
+          <div v-if="isLogin && !deviceVerificationRequired" class="form-field">
             <label for="login-identifier">邮箱</label>
             <t-form-item name="identifier">
               <t-input
@@ -90,7 +90,7 @@
                   variant="outline"
                   class="verification-button"
                   :loading="verificationSending"
-                  :disabled="loading || verificationSending || cooldown > 0 || !humanVerificationReady"
+                  :disabled="loading || verificationSending || cooldown > 0 || (!deviceVerificationRequired && !humanVerificationReady)"
                   @click="requestVerificationCode"
                 >
                   {{ cooldown > 0 ? `${cooldown}s 后重发` : '发送验证码' }}
@@ -112,12 +112,12 @@
             </t-form-item>
           </div>
 
-          <div v-if="turnstileEnabled" class="turnstile-field">
+          <div v-if="!deviceVerificationRequired && turnstileEnabled" class="turnstile-field">
             <div ref="turnstileContainer" class="turnstile-widget"></div>
             <p v-if="turnstileError" class="turnstile-error" role="alert">{{ turnstileError }}</p>
           </div>
 
-          <div v-else-if="localCaptchaEnabled" class="local-captcha-field">
+          <div v-else-if="!deviceVerificationRequired && localCaptchaEnabled" class="local-captcha-field">
             <label for="local-captcha-answer">图形验证码</label>
             <div class="local-captcha-row">
               <t-input
@@ -158,10 +158,13 @@
       </t-loading>
 
       <div class="account-switch">
-        <template v-if="isLogin">
+        <template v-if="isLogin && !deviceVerificationRequired">
           <router-link to="/forgot-password">忘记密码</router-link>
           <span v-if="cfg.allow_register" class="switch-separator">|</span>
           <router-link v-if="cfg.allow_register" to="/register">创建账户</router-link>
+        </template>
+        <template v-else-if="deviceVerificationRequired">
+          <button type="button" class="text-button" @click="resetDeviceVerification">返回账号登录</button>
         </template>
         <template v-else-if="isRegister">
           已有账户？<router-link to="/login">登录</router-link>
@@ -174,7 +177,7 @@
         </template>
       </div>
 
-      <template v-if="isLogin">
+      <template v-if="isLogin && !deviceVerificationRequired">
         <div class="login-divider" aria-hidden="true"><span>或</span></div>
         <button
           class="free-button"
@@ -244,6 +247,9 @@ const localCaptchaToken = ref('')
 const localCaptchaImage = ref('')
 const localCaptchaAnswer = ref('')
 const localCaptchaLoading = ref(false)
+const deviceVerificationRequired = ref(false)
+const deviceTicket = ref('')
+const deviceMaskedEmail = ref('')
 let turnstileScriptPromise: Promise<void> | null = null
 let cooldownTimer: number | null = null
 let verificationDeliveryTimer: number | null = null
@@ -254,8 +260,8 @@ const isForgotPassword = computed(() => route.path === '/forgot-password')
 const isBinding = computed(() => route.path === '/bind-email')
 const isLogin = computed(() => !isRegister.value && !isForgotPassword.value && !isBinding.value)
 const needsEmail = computed(() => !isLogin.value)
-const needsCurrentPassword = computed(() => isLogin.value || isRegister.value)
-const needsVerificationCode = computed(() => isRegister.value || isForgotPassword.value || isBinding.value)
+const needsCurrentPassword = computed(() => (isLogin.value && !deviceVerificationRequired.value) || isRegister.value)
+const needsVerificationCode = computed(() => deviceVerificationRequired.value || isRegister.value || isForgotPassword.value || isBinding.value)
 const turnstileEnabled = computed(() => cfg.value.turnstile_enabled && Boolean(cfg.value.turnstile_site_key))
 const localCaptchaEnabled = computed(() => cfg.value.local_captcha_enabled)
 const turnstileAction = computed(() => {
@@ -264,7 +270,7 @@ const turnstileAction = computed(() => {
   if (isBinding.value) return 'bind_email'
   return 'login'
 })
-const needsTurnstileForSubmit = computed(() => isLogin.value)
+const needsTurnstileForSubmit = computed(() => isLogin.value && !deviceVerificationRequired.value)
 const humanVerificationReady = computed(() => {
   if (localCaptchaEnabled.value) {
     return Boolean(localCaptchaToken.value && localCaptchaAnswer.value.trim().length === 6)
@@ -273,17 +279,23 @@ const humanVerificationReady = computed(() => {
   return true
 })
 const pageCopy = computed(() => {
+  if (deviceVerificationRequired.value) return { title: '验证新设备', description: `验证码将发送至 ${deviceMaskedEmail.value || '已绑定邮箱'}`, submit: '验证并登录' }
   if (isRegister.value) return { title: '创建账户', description: '验证邮箱后即可完成注册', submit: '创建账户' }
   if (isForgotPassword.value) return { title: '重置密码', description: '验证邮箱后设置新的登录密码', submit: '重置密码' }
   if (isBinding.value) return { title: '绑定邮箱', description: '完成验证后继续使用此账户', submit: '完成绑定' }
   return { title: '欢迎回来', description: '使用邮箱登录，旧账号可继续使用用户名', submit: '登录' }
 })
 const submitDisabled = computed(() => {
+  if (deviceVerificationRequired.value) return false
   if (localCaptchaEnabled.value) return !humanVerificationReady.value
   return needsTurnstileForSubmit.value && !humanVerificationReady.value
 })
 const rules = computed(() => {
   const fieldRules: Record<string, unknown[]> = {}
+  if (deviceVerificationRequired.value) {
+    fieldRules.verification_code = [{ required: true, message: '请输入邮箱验证码', trigger: 'blur' }]
+    return fieldRules
+  }
   if (isLogin.value) {
     fieldRules.identifier = [{ required: true, message: '请输入邮箱或用户名', trigger: 'blur' }]
     fieldRules.password = [{ required: true, message: '请输入密码', trigger: 'blur' }]
@@ -348,7 +360,10 @@ const loadLocalCaptcha = async () => {
       cache: 'no-store'
     })
     if (!response.ok) throw new Error('captcha unavailable')
-    const data = await response.json()
+    const contentType = response.headers.get('content-type') || ''
+    const text = await response.text()
+    if (!contentType.includes('application/json')) throw new Error('captcha unavailable')
+    const data = JSON.parse(text)
     localCaptchaToken.value = data.captcha_token || ''
     localCaptchaImage.value = data.image_data_url || ''
   } catch {
@@ -441,24 +456,25 @@ const watchVerificationDelivery = (challengeId: string) => {
 }
 
 const requestVerificationCode = async () => {
-  if (!emailLooksPresent()) {
+  if (!deviceVerificationRequired.value && !emailLooksPresent()) {
     MessagePlugin.warning('请先输入有效邮箱')
     return
   }
-  if (!humanVerificationReady.value) {
+  if (!deviceVerificationRequired.value && !humanVerificationReady.value) {
     MessagePlugin.warning('请完成人机验证')
     return
   }
 
-  const url = isRegister.value
+  const url = deviceVerificationRequired.value
+    ? '/0x/user/device-login/request'
+    : isRegister.value
     ? '/0x/user/email-verifications/request'
     : isForgotPassword.value
       ? '/0x/user/password-reset/request'
       : '/0x/user/email-binding/request'
-  const payload: Record<string, string> = {
-    email: form.email.trim(),
-    ...humanVerificationPayload()
-  }
+  const payload: Record<string, string> = deviceVerificationRequired.value
+    ? { device_ticket: deviceTicket.value }
+    : { email: form.email.trim(), ...humanVerificationPayload() }
   if (isBinding.value) payload.binding_ticket = sessionStorage.getItem(BINDING_TICKET_STORAGE_KEY) || ''
 
   verificationSending.value = true
@@ -468,7 +484,7 @@ const requestVerificationCode = async () => {
     verificationDeliveryMessage.value = data.challenge_id ? '验证码正在发送，请稍候' : '验证码正在发送，请查收邮箱'
     MessagePlugin.success(data.message || '验证码已进入发送队列')
     startCooldown()
-    await resetHumanVerification()
+    if (!deviceVerificationRequired.value) await resetHumanVerification()
     if (data.challenge_id) watchVerificationDelivery(data.challenge_id)
   }
 }
@@ -490,6 +506,18 @@ const onSubmit = async ({ validateResult }: any) => {
 
   loading.value = true
   try {
+    if (deviceVerificationRequired.value) {
+      const data = await userStore.login('/0x/user/device-login/confirm', {
+        device_ticket: deviceTicket.value,
+        verification_code: form.verification_code.trim()
+      })
+      if (data.authenticated) {
+        resetDeviceVerification()
+        await goAfterAuthentication()
+      }
+      return
+    }
+
     if (isLogin.value) {
       const data = await userStore.login('/0x/user/login', {
         identifier: form.identifier.trim(),
@@ -499,6 +527,15 @@ const onSubmit = async ({ validateResult }: any) => {
       if (data.email_binding_required && data.binding_ticket) {
         sessionStorage.setItem(BINDING_TICKET_STORAGE_KEY, data.binding_ticket)
         await router.replace('/bind-email')
+        return
+      }
+      if (data.device_verification_required && data.device_ticket) {
+        deviceVerificationRequired.value = true
+        deviceTicket.value = data.device_ticket
+        deviceMaskedEmail.value = data.masked_email || ''
+        form.verification_code = ''
+        verificationDeliveryMessage.value = ''
+        await requestVerificationCode()
         return
       }
       if (data.authenticated) await goAfterAuthentication()
@@ -545,10 +582,21 @@ const onSubmit = async ({ validateResult }: any) => {
     }
   } catch (error: any) {
     MessagePlugin.error(error.message || '操作失败')
-    await resetHumanVerification()
+    if (!deviceVerificationRequired.value) await resetHumanVerification()
   } finally {
     loading.value = false
   }
+}
+
+const resetDeviceVerification = () => {
+  deviceVerificationRequired.value = false
+  deviceTicket.value = ''
+  deviceMaskedEmail.value = ''
+  form.verification_code = ''
+  verificationDeliveryMessage.value = ''
+  if (cooldownTimer) window.clearInterval(cooldownTimer)
+  cooldownTimer = null
+  cooldown.value = 0
 }
 
 const goFree = async () => {
@@ -575,7 +623,11 @@ const goFree = async () => {
 const getVersionCfg = async () => {
   try {
     const response = await fetch('/0x/user/version-cfg', { credentials: 'include' })
-    const data = await response.json()
+    if (!response.ok) throw new Error('version unavailable')
+    const contentType = response.headers.get('content-type') || ''
+    const text = await response.text()
+    if (!contentType.includes('application/json')) throw new Error('version unavailable')
+    const data = JSON.parse(text)
     Object.assign(cfg.value, data)
     if (isRegister.value && !cfg.value.allow_register) await router.replace('/login')
   } catch {
@@ -668,6 +720,7 @@ onBeforeUnmount(() => {
 .login-button:hover { background: #3a3a37; border-color: #3a3a37; }
 .account-switch { margin: 22px 0 0; color: var(--login-muted); font-size: 14px; line-height: 22px; text-align: center; }
 .account-switch a { color: var(--login-text); font-weight: 600; text-decoration: underline; text-decoration-color: #b8b8b3; text-underline-offset: 3px; }
+.text-button { padding: 0; color: var(--login-text); font: inherit; font-weight: 600; cursor: pointer; background: transparent; border: 0; text-decoration: underline; text-decoration-color: #b8b8b3; text-underline-offset: 3px; }
 .switch-separator { padding: 0 10px; color: #b0afa9; }
 .login-divider { display: flex; align-items: center; gap: 12px; margin: 24px 0; color: #8a8a85; font-size: 13px; }
 .login-divider::before, .login-divider::after { flex: 1; height: 1px; background: #dfdfdb; content: ''; }

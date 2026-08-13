@@ -147,7 +147,13 @@ def probe_web_session(account, *, public_url):
             return False, f"bootstrap_{bootstrap.status_code}"
         response = client.get(public_url.rstrip("/") + "/backend-api/me", timeout=30)
         if response.status_code == 200:
-            return True, ""
+            try:
+                payload = response.json()
+            except Exception:
+                return False, "me_invalid_json"
+            if isinstance(payload, dict) and (payload.get("user") or payload.get("id")):
+                return True, ""
+            return False, "me_missing_user"
         try:
             payload = response.json()
             code = (payload.get("error") or {}).get("code") or ""

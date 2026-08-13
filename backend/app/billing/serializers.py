@@ -64,6 +64,8 @@ class PlanSerializer(serializers.ModelSerializer):
             "user_limit",
             "daily_quota",
             "monthly_quota",
+            "multi_device_enabled",
+            "device_limit",
             "is_active",
             "is_public",
             "is_archived",

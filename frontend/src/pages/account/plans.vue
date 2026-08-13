@@ -34,6 +34,9 @@
           <template #quota="{ row }">
             {{ quotaLabel(row.daily_quota, '日') }} · {{ quotaLabel(row.monthly_quota, '月') }}
           </template>
+          <template #devices="{ row }">
+            {{ row.multi_device_enabled ? `最多 ${row.device_limit} 台` : '仅 1 台' }}
+          </template>
           <template #op="{ row }">
             <t-space size="small">
               <t-link theme="primary" @click="openPlanDialog(row)">编辑</t-link>
@@ -110,6 +113,15 @@
             <span class="field-tip">0 表示不限请求次数</span>
           </t-form-item>
         </div>
+        <div class="device-policy-grid">
+          <t-form-item label="允许多设备">
+            <t-switch v-model="planForm.multi_device_enabled" />
+          </t-form-item>
+          <t-form-item label="设备上限">
+            <t-input-number v-model="planForm.device_limit" :min="1" :max="50" :disabled="!planForm.multi_device_enabled" />
+            <span class="field-tip">同一浏览器算一台，换浏览器、无痕窗口或清理 Cookie 会被识别为新设备</span>
+          </t-form-item>
+        </div>
         <t-form-item label="公开上架"><t-switch v-model="planForm.is_public" /></t-form-item>
         <t-form-item label="允许使用"><t-switch v-model="planForm.is_active" /></t-form-item>
         <t-form-item label="排序"><t-input-number v-model="planForm.sort_order" :min="0" /></t-form-item>
@@ -162,6 +174,7 @@ const planColumns = [
   { colKey: 'pool_tier', title: '等级', cell: 'pool_tier', width: 90 },
   { colKey: 'capacity', title: '号池 / 套餐人数', cell: 'capacity', width: 145 },
   { colKey: 'quota', title: '请求额度', cell: 'quota', width: 150 },
+  { colKey: 'devices', title: '设备上限', cell: 'devices', width: 110 },
   { colKey: 'status', title: '状态', cell: 'status', width: 100 },
   { colKey: 'op', title: '操作', cell: 'op', width: 130 }
 ]
@@ -182,7 +195,7 @@ const offers = computed(() => plans.value.flatMap(plan => (plan.offers || []).ma
   plan_name: plan.name
 }))))
 
-const planForm = reactive<any>({ id: 0, code: '', name: '', tagline: '', pool_ids: [], pool_tier: 'STANDARD', user_limit: 0, daily_quota: 0, monthly_quota: 0, is_active: true, is_public: true, sort_order: 0 })
+const planForm = reactive<any>({ id: 0, code: '', name: '', tagline: '', pool_ids: [], pool_tier: 'STANDARD', user_limit: 0, daily_quota: 0, monthly_quota: 0, multi_device_enabled: true, device_limit: 3, is_active: true, is_public: true, sort_order: 0 })
 const offerForm = reactive<any>({ id: 0, plan_id: null, code: 'monthly', name: '月套餐', months: 1, price_yuan: 0, is_draft: false, is_purchase_enabled: true })
 
 const loadData = async () => {
@@ -197,8 +210,9 @@ const openPlanDialog = (row?: any) => {
   Object.assign(planForm, row ? {
     id: row.id, code: row.code, name: row.name, tagline: row.tagline, pool_ids: [...(row.pool_ids || [])],
     pool_tier: row.pool_tier, user_limit: Number(row.user_limit || 0), daily_quota: Number(row.daily_quota || 0),
-    monthly_quota: Number(row.monthly_quota || 0), is_active: row.is_active, is_public: row.is_public, sort_order: row.sort_order
-  } : { id: 0, code: '', name: '', tagline: '', pool_ids: pools.value[0]?.id ? [pools.value[0].id] : [], pool_tier: 'STANDARD', user_limit: 0, daily_quota: 0, monthly_quota: 0, is_active: true, is_public: true, sort_order: 0 })
+    monthly_quota: Number(row.monthly_quota || 0), multi_device_enabled: row.multi_device_enabled !== false,
+    device_limit: Number(row.device_limit || 3), is_active: row.is_active, is_public: row.is_public, sort_order: row.sort_order
+  } : { id: 0, code: '', name: '', tagline: '', pool_ids: pools.value[0]?.id ? [pools.value[0].id] : [], pool_tier: 'STANDARD', user_limit: 0, daily_quota: 0, monthly_quota: 0, multi_device_enabled: true, device_limit: 3, is_active: true, is_public: true, sort_order: 0 })
   planDialog.value = true
 }
 
@@ -254,10 +268,11 @@ onMounted(loadData)
 .section-heading h2 { font-size: 18px; font-weight: 600; }
 .section-heading p { margin-top: 5px; color: var(--app-text-muted); font-size: 13px; }
 .limit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.device-policy-grid { display: grid; grid-template-columns: minmax(160px, .7fr) minmax(260px, 1.3fr); gap: 12px; }
 .limit-grid :deep(.t-form__item) { display: block; }
 .field-tip { display: block; margin-top: 5px; color: var(--app-text-muted); font-size: 12px; line-height: 1.4; }
 .plan-form-scroll { max-height: calc(100vh - 220px); overflow-y: auto; padding-right: 6px; }
 .admin-page small { color: var(--app-text-muted); font-size: 11px; }
 @media (max-width: 720px) { .admin-section { padding: 18px 14px; } .section-heading { align-items: flex-start; flex-direction: column; } }
-@media (max-width: 620px) { .limit-grid { grid-template-columns: 1fr; } }
+@media (max-width: 620px) { .limit-grid, .device-policy-grid { grid-template-columns: 1fr; } }
 </style>

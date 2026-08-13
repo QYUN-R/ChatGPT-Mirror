@@ -10,7 +10,7 @@ from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 from rest_framework.test import APIClient
 
-from app.accounts.models import User
+from app.accounts.models import User, UserDeviceSession
 from app.accounts.views import UserChatGPTAccountList, UserRelateGPTCarView
 from app.billing.exceptions import BillingError, CapacityUnavailable, PaymentRejected, SubscriptionInactive
 from app.billing.models import (
@@ -945,6 +945,112 @@ class BillingApiTests(TestCase):
         self.user.refresh_from_db()
         self.assertEqual(self.user.daily_quota, 30)
         self.assertEqual(self.user.monthly_quota, 600)
+
+    def test_admin_controls_plan_tagline_independently_from_device_policy(self):
+        self.client.force_authenticate(self.admin)
+        custom_tagline = "由管理员自由填写的套餐宣传语"
+        base_payload = {
+            "action": "save_plan",
+            "id": self.plan.id,
+            "code": self.plan.code,
+            "name": self.plan.name,
+            "pool_ids": [self.pool.id],
+            "pool_tier": PoolTier.STANDARD,
+            "user_limit": 0,
+            "daily_quota": 0,
+            "monthly_quota": 0,
+            "multi_device_enabled": True,
+            "device_limit": 5,
+            "is_active": True,
+            "is_public": True,
+            "sort_order": 0,
+        }
+        response = self.client.post(
+            "/0x/admin/plans",
+            {**base_payload, "tagline": custom_tagline},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["plan"]["tagline"], custom_tagline)
+
+        response = self.client.post(
+            "/0x/admin/plans",
+            {**base_payload, "device_limit": 2},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.plan.refresh_from_db()
+        self.assertEqual(self.plan.tagline, custom_tagline)
+        self.assertEqual(self.plan.device_limit, 2)
+
+    def test_plan_device_limit_shrink_keeps_primary_and_most_recent_device(self):
+        self.plan.device_limit = 5
+        self.plan.tagline = "设备策略调整时保留的宣传语"
+        self.plan.save(update_fields=["device_limit", "tagline", "updated_at"])
+        self.client.force_authenticate(self.user)
+        purchased = self.client.post(
+            "/0x/billing/orders",
+            {"offer_id": self.offer.id, "idempotency_key": "device-limit-shrink", "pay_now": True},
+            format="json",
+        )
+        self.assertEqual(purchased.status_code, 200)
+
+        now = timezone.now()
+        sessions = []
+        for index in range(5):
+            session = UserDeviceSession.objects.create(
+                user=self.user,
+                token_hash=f"{index + 1:064x}",
+                device_key_hash=f"{index + 101:064x}",
+                gateway_subject=(
+                    self.user.username if index == 0 else f"{self.user.username}:device:test-{index}"
+                ),
+                is_primary=index == 0,
+                device_type="mobile" if index % 2 else "desktop",
+                verified_at=now,
+                expires_at=now + timedelta(days=1),
+            )
+            UserDeviceSession.objects.filter(pk=session.pk).update(
+                last_seen_at=now - timedelta(minutes=10 - index)
+            )
+            session.refresh_from_db()
+            sessions.append(session)
+
+        self.client.force_authenticate(self.admin)
+        with patch("app.utils.req_gateway", return_value={"message": "ok"}) as gateway_logout:
+            response = self.client.post(
+                "/0x/admin/plans",
+                {
+                    "action": "save_plan",
+                    "id": self.plan.id,
+                    "code": self.plan.code,
+                    "name": self.plan.name,
+                    "pool_ids": [self.pool.id],
+                    "pool_tier": PoolTier.STANDARD,
+                    "user_limit": 0,
+                    "daily_quota": 0,
+                    "monthly_quota": 0,
+                    "multi_device_enabled": True,
+                    "device_limit": 2,
+                    "is_active": True,
+                    "is_public": True,
+                    "sort_order": 0,
+                },
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        active_ids = set(
+            UserDeviceSession.objects.filter(
+                user=self.user,
+                revoked_at__isnull=True,
+                expires_at__gt=now,
+            ).values_list("id", flat=True)
+        )
+        self.assertEqual(active_ids, {sessions[0].id, sessions[4].id})
+        self.assertEqual(gateway_logout.call_count, 3)
+        self.plan.refresh_from_db()
+        self.assertEqual(self.plan.tagline, "设备策略调整时保留的宣传语")
 
     def test_admin_can_view_active_account_users_without_upstream_credentials(self):
         self.user.email = "bound-user@example.com"

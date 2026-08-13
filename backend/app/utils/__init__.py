@@ -145,7 +145,16 @@ def redact_sensitive_data(value, *, secrets=()):
 
 def get_request_subject(request):
     if request.user.username != FREE_ACCOUNT_USERNAME:
-        return request.user.username
+        from app.accounts.authentication import (
+            device_subject,
+            get_device_session,
+            has_device_cookie,
+        )
+
+        session = get_device_session(request, request.user)
+        if has_device_cookie(request) and not session:
+            raise ValidationError({"message": "当前设备登录已失效，请重新登录"})
+        return device_subject(request.user, session)
 
     token = request.COOKIES.get("free_session", "").strip()
     try:

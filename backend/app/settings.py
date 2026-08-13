@@ -231,6 +231,8 @@ else:
     }
 
 API_TOKEN_TTL_SECONDS = int(os.environ.get("API_TOKEN_TTL_SECONDS", str(7 * 24 * 60 * 60)))
+DEFAULT_MULTI_DEVICE_ENABLED = env_bool("DEFAULT_MULTI_DEVICE_ENABLED", True)
+DEFAULT_DEVICE_LIMIT = max(1, min(50, int(os.environ.get("DEFAULT_DEVICE_LIMIT", "3"))))
 
 ROOT_URLCONF = "app.urls"
 

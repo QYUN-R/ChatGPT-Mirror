@@ -362,7 +362,20 @@ select {
   }
 
   .t-card__title { font-size: 18px; }
-  .t-card__header { align-items: flex-start; gap: 12px; }
+  .t-card__header {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .t-card__header-wrapper,
+  .t-card__header-content {
+    width: 100%;
+    min-width: 0;
+  }
+  .t-card__title,
+  .t-card__subtitle {
+    overflow-wrap: anywhere;
+  }
   .t-card__actions { width: 100%; }
   .t-card__actions .t-button { width: 100%; min-height: 44px; }
   .t-form__item { margin-bottom: 20px; }

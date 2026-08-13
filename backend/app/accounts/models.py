@@ -17,6 +17,16 @@ class User(AbstractUser):
     daily_quota = models.PositiveIntegerField(default=0, verbose_name="每日配额")
     monthly_quota = models.PositiveIntegerField(default=0, verbose_name="每月配额")
     force_chat_mode = models.BooleanField(default=True, verbose_name="自动退出 Work 模式")
+    multi_device_enabled = models.BooleanField(default=True, verbose_name="允许多设备")
+    device_policy_managed_by_plan = models.BooleanField(
+        default=True,
+        verbose_name="设备策略跟随套餐",
+    )
+    device_limit = models.PositiveSmallIntegerField(default=3, verbose_name="设备上限")
+    new_device_verification_enabled = models.BooleanField(
+        default=True,
+        verbose_name="新设备邮箱验证",
+    )
     email_verified_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -27,7 +37,50 @@ class User(AbstractUser):
                 Lower("email"),
                 condition=~Q(email=""),
                 name="accounts_user_email_ci_unique",
-            )
+            ),
+            models.CheckConstraint(
+                condition=Q(device_limit__gte=1, device_limit__lte=50),
+                name="accounts_user_device_limit_range",
+            ),
+        ]
+
+
+class UserDeviceSession(models.Model):
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="device_sessions",
+    )
+    token_hash = models.CharField(max_length=64, unique=True)
+    device_key_hash = models.CharField(max_length=64, null=True, blank=True)
+    subject_id = models.UUIDField(default=uuid.uuid4, editable=False)
+    gateway_subject = models.CharField(max_length=220, blank=True)
+    is_primary = models.BooleanField(default=False)
+    device_type = models.CharField(max_length=16, blank=True)
+    browser_name = models.CharField(max_length=48, blank=True)
+    os_name = models.CharField(max_length=48, blank=True)
+    user_agent = models.CharField(max_length=512, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(db_index=True)
+    revoked_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-last_seen_at",)
+        indexes = [
+            models.Index(
+                fields=("user", "revoked_at", "expires_at"),
+                name="acct_dev_user_rev_exp_idx",
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user", "device_key_hash"),
+                condition=Q(device_key_hash__isnull=False),
+                name="acct_dev_user_key_uniq",
+            ),
         ]
 
 
@@ -36,6 +89,7 @@ class EmailVerificationPurpose(models.TextChoices):
     PASSWORD_RESET = "PASSWORD_RESET", "找回密码"
     EMAIL_BINDING = "EMAIL_BINDING", "绑定邮箱"
     EMAIL_CHANGE = "EMAIL_CHANGE", "修改邮箱"
+    DEVICE_LOGIN = "DEVICE_LOGIN", "新设备登录"
 
 
 class EmailDeliveryStatus(models.TextChoices):

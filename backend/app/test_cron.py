@@ -92,6 +92,46 @@ class UpdateAccessTokenTests(TestCase):
         self.assertFalse(healthy)
         self.assertEqual(error, "token_invalidated")
 
+    @patch("app.cron.requests.post")
+    @patch("app.cron.requests.Session")
+    def test_web_probe_rejects_login_page_disguised_as_success(self, session_factory, post):
+        post.return_value = Mock(
+            status_code=200,
+            json=lambda: {"login_url": "/api/not-login?user_gateway_token=test"},
+            raise_for_status=lambda: None,
+        )
+        client = session_factory.return_value
+        client.get.side_effect = [
+            Mock(status_code=200),
+            Mock(status_code=200, json=lambda: {"detail": "not authenticated"}),
+        ]
+        account = self.make_account()
+
+        healthy, error = probe_web_session(account, public_url="https://mirror.example")
+
+        self.assertFalse(healthy)
+        self.assertEqual(error, "me_missing_user")
+
+    @patch("app.cron.requests.post")
+    @patch("app.cron.requests.Session")
+    def test_web_probe_accepts_current_me_payload_without_legacy_user_wrapper(self, session_factory, post):
+        post.return_value = Mock(
+            status_code=200,
+            json=lambda: {"login_url": "/api/not-login?user_gateway_token=test"},
+            raise_for_status=lambda: None,
+        )
+        client = session_factory.return_value
+        client.get.side_effect = [
+            Mock(status_code=200),
+            Mock(status_code=200, json=lambda: {"id": "user-123", "email": "account@example.com"}),
+        ]
+        account = self.make_account()
+
+        healthy, error = probe_web_session(account, public_url="https://mirror.example")
+
+        self.assertTrue(healthy)
+        self.assertEqual(error, "")
+
     def test_only_explicit_auth_errors_invalidate_stored_credentials(self):
         self.assertTrue(_web_probe_invalidates_credentials("token_invalidated"))
         self.assertFalse(_web_probe_invalidates_credentials("ReadTimeout"))

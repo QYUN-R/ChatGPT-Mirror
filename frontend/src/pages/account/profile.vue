@@ -39,6 +39,32 @@
         </t-form-item>
       </t-form>
     </t-card>
+    <t-card title="登录设备" subtitle="同一浏览器保持为同一设备，换浏览器或清理 Cookie 会识别为新设备" :bordered="false">
+      <t-loading :loading="devicesLoading">
+        <div class="device-policy-summary">
+          <div>
+            <strong>{{ devicePolicy.enabled ? `允许 ${devicePolicy.limit} 台设备` : '仅允许 1 台设备' }}</strong>
+            <span>{{ devicePolicySource }}</span>
+          </div>
+          <t-tag variant="light">{{ devices.length }} 台在线</t-tag>
+        </div>
+        <div class="profile-device-list">
+          <article v-for="device in devices" :key="device.id" class="profile-device-row">
+            <div>
+              <strong>{{ deviceLabel(device) }}</strong>
+              <span>{{ device.ip_address || '未知 IP' }} · 最近活跃 {{ formatDateTime(device.last_seen_at) }}</span>
+            </div>
+            <t-space size="small">
+              <t-tag v-if="device.is_current" theme="success" size="small" variant="light">当前设备</t-tag>
+              <t-popconfirm content="确定让这台设备退出登录吗？" @confirm="revokeDevice(device)">
+                <t-button theme="danger" variant="text" size="small">下线</t-button>
+              </t-popconfirm>
+            </t-space>
+          </article>
+          <div v-if="!devicesLoading && !devices.length" class="device-empty">暂无在线设备</div>
+        </div>
+      </t-loading>
+    </t-card>
 
     <t-dialog
       :visible="emailChangeVisible"
@@ -81,6 +107,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { MessagePlugin } from 'tdesign-vue-next'
 import request from '@/api/request'
+import { useUserStore } from '@/store/user'
 
 const quota = ref<any>({ daily: { limit: 0, used: 0 }, monthly: { limit: 0, used: 0 } })
 const loading = ref(false)
@@ -92,9 +119,13 @@ const emailChangeSubmitting = ref(false)
 const emailChangeCooldown = ref(0)
 const emailChangeDelivery = ref('')
 const router = useRouter()
+const userStore = useUserStore()
 const profile = ref({ email: '', email_verified: false, email_binding_ticket: '' })
 const form = reactive({ current_password: '', new_password: '' })
 const emailChange = reactive({ email: '', current_password: '', verification_code: '' })
+const devicesLoading = ref(false)
+const devices = ref<any[]>([])
+const devicePolicy = ref<any>({ enabled: true, limit: 3, source: 'system', plan_name: '' })
 let emailCooldownTimer: number | null = null
 let emailDeliveryTimer: number | null = null
 let emailDeliveryPollVersion = 0
@@ -102,6 +133,11 @@ const quotaItems = computed(() => [
   { label: '今日用量', ...quota.value.daily },
   { label: '本月用量', ...quota.value.monthly }
 ])
+const devicePolicySource = computed(() => {
+  if (devicePolicy.value.source === 'plan') return devicePolicy.value.plan_name ? `跟随 ${devicePolicy.value.plan_name}` : '跟随套餐'
+  if (devicePolicy.value.source === 'user') return '管理员单独设置'
+  return '系统默认'
+})
 
 const loadQuota = async () => {
   loading.value = true
@@ -120,6 +156,34 @@ const loadProfile = async () => {
     }
   }
   profileLoading.value = false
+}
+
+const loadDevices = async () => {
+  devicesLoading.value = true
+  const data = await request('/0x/user/devices')
+  devicesLoading.value = false
+  if (!data) return
+  devices.value = data.sessions || []
+  devicePolicy.value = data.policy || devicePolicy.value
+}
+
+const deviceLabel = (device: any) => {
+  const type = device.device_type === 'mobile' ? '手机' : device.device_type === 'tablet' ? '平板' : '电脑'
+  return `${type} · ${device.browser_name || '其他浏览器'} · ${device.os_name || '其他系统'}`
+}
+
+const formatDateTime = (value: string) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-'
+
+const revokeDevice = async (device: any) => {
+  const data = await request('/0x/user/devices', 'DELETE', { session_id: device.id })
+  if (!data) return
+  if (data.current_device_revoked) {
+    await userStore.logout()
+    await router.replace('/login')
+    return
+  }
+  MessagePlugin.success(data.message)
+  await loadDevices()
 }
 
 const startEmailBinding = async () => {
@@ -228,6 +292,7 @@ const changePassword = async () => {
 onMounted(() => {
   loadQuota()
   loadProfile()
+  loadDevices()
 })
 
 onBeforeUnmount(() => {
@@ -245,6 +310,13 @@ onBeforeUnmount(() => {
 .quota-row + .quota-row { margin-top: 24px; }
 .quota-head { display: flex; justify-content: space-between; margin-bottom: 10px; color: var(--app-text); font-size: 14px; }
 .verification-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; width: 100%; }
+.device-policy-summary { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 14px; padding: 12px 14px; background: #f7f7f5; border: 1px solid var(--app-border); border-radius: 6px; }
+.device-policy-summary strong, .device-policy-summary span, .profile-device-row strong, .profile-device-row span { display: block; }
+.device-policy-summary span, .profile-device-row span { margin-top: 4px; color: var(--app-text-muted); font-size: 12px; }
+.profile-device-list { display: grid; gap: 10px; }
+.profile-device-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 14px; border: 1px solid var(--app-border); border-radius: 6px; }
+.device-empty { padding: 20px 8px; color: var(--app-text-muted); text-align: center; }
 .form-help { color: var(--app-text-muted); font-size: 12px; line-height: 1.6; }
 @media (max-width: 900px) { .profile-grid { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .profile-device-row { align-items: flex-start; flex-direction: column; } }
 </style>

@@ -56,15 +56,25 @@ const parseResponseBody = async (response: Response) => {
   }
 }
 
-const request = async (url: string, method = 'GET', body?: any) => {
+const csrfCookie = () =>
+  document.cookie.match(/(?:^|; )csrftoken=([^;]*)/)?.[1] || ''
+
+const isCsrfFailure = (response: Response, data: any) => {
+  if (response.status !== 403) return false
+  const message = extractErrorMessage(data || {}).toLowerCase()
+  return message.includes('csrf')
+}
+
+const request = async (url: string, method = 'GET', body?: any, csrfRetry = true): Promise<any> => {
   const userStore = useUserStore()
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json'
   }
 
-  const csrfToken =
-    userStore.csrfToken || document.cookie.match(/(?:^|; )csrftoken=([^;]*)/)?.[1]
+  // Django rotates its CSRF secret at login and password/device-session changes.
+  // The cookie is therefore the source of truth; Pinia only provides a fallback.
+  const csrfToken = csrfCookie() || userStore.csrfToken
   if (csrfToken && !['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())) {
     headers['X-CSRFToken'] = decodeURIComponent(csrfToken)
   }
@@ -86,6 +96,11 @@ const request = async (url: string, method = 'GET', body?: any) => {
       userStore.logout()
       router.push('/login')
       return null
+    }
+
+    if (csrfRetry && isCsrfFailure(response, data)) {
+      const refreshed = await userStore.hydrate(true)
+      if (refreshed) return request(url, method, body, false)
     }
 
     if (response.status === 403) {

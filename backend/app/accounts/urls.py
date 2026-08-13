@@ -4,7 +4,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from app.accounts.views import UserAccountView, UserRelateGPTCarView, VisitLogView, BatchModelLimit, \
     UserChatGPTAccountList, GetMirrorToken, MirrorProxyConfigView, MirrorProxyTestView, CustomScriptConfigView
-from app.accounts.views import BatchUserActionView, CurrentUserView, ChangePasswordView, QuotaView, OperationsOverviewView
+from app.accounts.views import BatchUserActionView, CurrentUserView, DeviceSessionView, ChangePasswordView, QuotaView, OperationsOverviewView
 from app.accounts.views.login import (
     AccountLogin,
     AccountLogout,
@@ -15,6 +15,8 @@ from app.accounts.views.login import (
     EmailChangeRequestView,
     EmailVerificationStatusView,
     EmailVerificationRequestView,
+    DeviceLoginVerificationConfirmView,
+    DeviceLoginVerificationRequestView,
     LocalCaptchaView,
     PasswordResetConfirmView,
     PasswordResetRequestView,
@@ -39,6 +41,8 @@ urlpatterns = [
     path("login", csrf_exempt(AccountLogin.as_view())),
     path("email-verifications/request", csrf_exempt(EmailVerificationRequestView.as_view())),
     path("email-verifications/<uuid:challenge_id>/status", EmailVerificationStatusView.as_view()),
+    path("device-login/request", csrf_exempt(DeviceLoginVerificationRequestView.as_view())),
+    path("device-login/confirm", csrf_exempt(DeviceLoginVerificationConfirmView.as_view())),
     path("password-reset/request", csrf_exempt(PasswordResetRequestView.as_view())),
     path("password-reset/confirm", csrf_exempt(PasswordResetConfirmView.as_view())),
     path("email-binding/request", csrf_exempt(EmailBindingRequestView.as_view())),
@@ -49,6 +53,7 @@ urlpatterns = [
     path("visit-log", VisitLogView.as_view()),
     path("access-control", AccessControlView.as_view()),
     path("me", CurrentUserView.as_view()),
+    path("devices", DeviceSessionView.as_view()),
     path("change-password", ChangePasswordView.as_view()),
     path("quota", QuotaView.as_view()),
     path("overview", OperationsOverviewView.as_view()),

@@ -35,7 +35,7 @@ class Command(BaseCommand):
             code="standard-plus",
             defaults={
                 "name": "普通套餐",
-                "tagline": "稳定的 Plus 号池服务",
+                "tagline": "",
                 "pool": standard_pool,
                 "pool_tier": PoolTier.STANDARD,
                 "sort_order": 10,
@@ -45,7 +45,7 @@ class Command(BaseCommand):
             code="premium-plus",
             defaults={
                 "name": "高级套餐",
-                "tagline": "高优先级 Plus 号池服务",
+                "tagline": "",
                 "pool": premium_pool,
                 "pool_tier": PoolTier.PREMIUM,
                 "sort_order": 20,

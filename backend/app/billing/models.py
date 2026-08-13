@@ -106,6 +106,8 @@ class Plan(TimestampedModel):
     user_limit = models.PositiveIntegerField(default=0)
     daily_quota = models.PositiveIntegerField(default=0)
     monthly_quota = models.PositiveIntegerField(default=0)
+    multi_device_enabled = models.BooleanField(default=True)
+    device_limit = models.PositiveSmallIntegerField(default=3)
     is_active = models.BooleanField(default=True)
     is_public = models.BooleanField(default=True)
     is_archived = models.BooleanField(default=False)
@@ -113,9 +115,17 @@ class Plan(TimestampedModel):
 
     class Meta:
         ordering = ("sort_order", "id")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(device_limit__gte=1, device_limit__lte=50),
+                name="billing_plan_device_limit_range",
+            ),
+        ]
 
     def clean(self):
         errors = {}
+        if not 1 <= int(self.device_limit or 0) <= 50:
+            errors["device_limit"] = "设备上限必须在 1 到 50 之间"
         if self.pool_id and self.pool_tier:
             conflicting_plans = Plan.objects.filter(pool_id=self.pool_id).exclude(pk=self.pk).exclude(
                 pool_tier=self.pool_tier

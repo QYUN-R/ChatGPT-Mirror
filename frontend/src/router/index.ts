@@ -22,7 +22,10 @@ async function hasRequiredAnnouncement(): Promise<boolean> {
       { credentials: 'include' }
     )
     if (!response.ok) return false
-    const data = await response.json()
+    const contentType = response.headers.get('content-type') || ''
+    const text = await response.text()
+    if (!contentType.includes('application/json')) return false
+    const data = JSON.parse(text)
     return Array.isArray(data.results) && data.results.length > 0
   } catch {
     return false
@@ -216,9 +219,10 @@ router.beforeEach(async (to, _from, next) => {
     return
   }
   if (to.meta.requiresAdmin && (!authenticated || !userStore.isAdmin)) {
-    clearAccessibleCookies()
-    window.location.replace('/admin#/')
-    next(false)
+    if (authenticated && !userStore.isAdmin) {
+      clearAccessibleCookies()
+    }
+    next('/login')
     return
   }
 

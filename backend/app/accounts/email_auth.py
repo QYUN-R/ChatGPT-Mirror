@@ -19,6 +19,7 @@ from app.accounts.models import (
 
 
 BINDING_TICKET_SALT = "accounts.email-binding.v1"
+DEVICE_LOGIN_TICKET_SALT = "accounts.device-login.v1"
 logger = logging.getLogger(__name__)
 
 
@@ -83,6 +84,7 @@ def verification_message(code, purpose):
         EmailVerificationPurpose.PASSWORD_RESET: "重置密码",
         EmailVerificationPurpose.EMAIL_BINDING: "绑定邮箱",
         EmailVerificationPurpose.EMAIL_CHANGE: "修改绑定邮箱",
+        EmailVerificationPurpose.DEVICE_LOGIN: "新设备登录",
     }.get(purpose, "安全验证")
     return (
         f"你正在进行{label}。\n\n"
@@ -90,6 +92,30 @@ def verification_message(code, purpose):
         f"有效期：{settings.EMAIL_VERIFICATION_CODE_TTL_SECONDS // 60} 分钟。\n\n"
         "请勿将验证码、密码或登录信息提供给任何人。"
     )
+
+
+def issue_device_login_ticket(user, device_key_hash):
+    return signing.dumps(
+        {"user_id": user.pk, "device_key_hash": str(device_key_hash)},
+        salt=DEVICE_LOGIN_TICKET_SALT,
+        compress=True,
+    )
+
+
+def load_device_login_ticket(value):
+    try:
+        payload = signing.loads(
+            str(value or ""),
+            salt=DEVICE_LOGIN_TICKET_SALT,
+            max_age=settings.EMAIL_BINDING_TICKET_TTL_SECONDS,
+        )
+    except signing.BadSignature as exc:
+        raise ValidationError({"message": "新设备验证会话已过期，请重新登录"}) from exc
+    user = User.objects.filter(pk=payload.get("user_id"), is_active=True).first()
+    device_key_hash = str(payload.get("device_key_hash") or "")
+    if not user or len(device_key_hash) != 64:
+        raise ValidationError({"message": "新设备验证会话无效，请重新登录"})
+    return user, device_key_hash
 
 
 def create_verification_challenge(*, email, purpose, user=None, ip_address=""):

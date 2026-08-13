@@ -16,6 +16,7 @@
         <t-button variant="outline" @click="applyFilters">查询</t-button>
         <t-button variant="outline" :disabled="!selectedRowKeys.length" @click="batchAction('activate')">批量启用</t-button>
         <t-button variant="outline" :disabled="!selectedRowKeys.length" @click="batchAction('deactivate')">批量禁用</t-button>
+        <t-button variant="outline" :disabled="!selectedRowKeys.length" @click="openBatchDeviceDialog">批量设备策略</t-button>
       </div>
 
       <div class="desktop-user-table">
@@ -45,12 +46,12 @@
           {{ row.expired_date || '永久' }}
         </template>
         <template #model_limit="{ row }">
-          <t-space size="small" v-if="row.model_limit && row.model_limit.length > 0">
-            <t-tag v-for="model in row.model_limit.slice(0, 2)" :key="model" size="small">
+          <t-space size="small" v-if="normalizedModelLimits(row.model_limit).length > 0">
+            <t-tag v-for="model in normalizedModelLimits(row.model_limit).slice(0, 2)" :key="model" size="small">
               {{ model }}
             </t-tag>
-            <t-tag v-if="row.model_limit.length > 2" size="small">
-              +{{ row.model_limit.length - 2 }}
+            <t-tag v-if="normalizedModelLimits(row.model_limit).length > 2" size="small">
+              +{{ normalizedModelLimits(row.model_limit).length - 2 }}
             </t-tag>
           </t-space>
           <span v-else class="text-gray">全部模型</span>
@@ -60,6 +61,12 @@
             {{ row.force_chat_mode !== false ? '自动切回' : '允许 Work' }}
           </t-tag>
         </template>
+        <template #device_policy="{ row }">
+          <div class="device-policy-cell">
+            <strong>{{ row.device_policy?.enabled ? `${row.device_policy.limit} 台` : '仅 1 台' }}</strong>
+            <span>{{ devicePolicySource(row.device_policy) }} · 在线 {{ row.active_device_count || 0 }}</span>
+          </div>
+        </template>
         <template #subscription="{ row }">
           <div v-if="row.subscription" class="subscription-cell">
             <strong>{{ row.subscription.plan_name }}</strong>
@@ -68,8 +75,9 @@
           <span v-else class="text-gray">未开通</span>
         </template>
         <template #op="{ row }">
-          <t-space>
-            <t-link theme="primary" @click="showEditDialog(row)">编辑</t-link>
+            <t-space>
+              <t-link theme="primary" @click="showEditDialog(row)">编辑</t-link>
+              <t-link theme="primary" @click="openDeviceDialog(row)">设备</t-link>
             <t-popconfirm content="确定删除该用户吗？" @confirm="handleDelete(row)">
               <t-link theme="danger">删除</t-link>
             </t-popconfirm>
@@ -92,11 +100,13 @@
           <dl>
             <div><dt>邮箱</dt><dd>{{ row.email || '未绑定' }}<span v-if="row.email"> · {{ row.email_verified ? '已验证' : '待验证' }}</span></dd></div>
             <div><dt>套餐</dt><dd>{{ row.subscription?.plan_name || '未开通' }}</dd></div>
+            <div><dt>设备</dt><dd>{{ row.device_policy?.enabled ? `${row.active_device_count || 0} / ${row.device_policy.limit} 台` : '仅 1 台' }} · {{ devicePolicySource(row.device_policy) }}</dd></div>
             <div><dt>过期</dt><dd>{{ row.expired_date || '永久' }}</dd></div>
             <div><dt>备注</dt><dd>{{ row.remark || '-' }}</dd></div>
           </dl>
           <div class="mobile-user-actions">
             <t-button variant="outline" @click="showEditDialog(row)">编辑</t-button>
+            <t-button variant="outline" @click="openDeviceDialog(row)">设备</t-button>
             <t-popconfirm content="确定删除该用户吗？" @confirm="handleDelete(row)">
               <t-button theme="danger" variant="outline">删除</t-button>
             </t-popconfirm>
@@ -141,8 +151,29 @@
         <t-form-item label="是否启用" name="is_active">
           <t-switch v-model="formData.is_active" />
         </t-form-item>
-        <t-form-item label="独立会话" name="isolated_session">
+        <t-form-item label="账号独立会话" name="isolated_session">
           <t-switch v-model="formData.isolated_session" />
+        </t-form-item>
+        <t-form-item label="设备策略" name="device_policy_managed_by_plan">
+          <t-radio-group v-model="formData.device_policy_managed_by_plan">
+            <t-radio :value="true">跟随套餐</t-radio>
+            <t-radio :value="false">单独设置</t-radio>
+          </t-radio-group>
+          <template #help>
+            <span class="form-help">跟随套餐时自动采用当前套餐上限；没有套餐时使用系统默认值</span>
+          </template>
+        </t-form-item>
+        <template v-if="!formData.device_policy_managed_by_plan">
+          <t-form-item label="允许多设备" name="multi_device_enabled">
+            <t-switch v-model="formData.multi_device_enabled" />
+          </t-form-item>
+          <t-form-item label="设备上限" name="device_limit">
+            <t-input-number v-model="formData.device_limit" :min="1" :max="50" :disabled="!formData.multi_device_enabled" />
+          </t-form-item>
+        </template>
+        <t-form-item label="新设备验证" name="new_device_verification_enabled">
+          <t-switch v-model="formData.new_device_verification_enabled" />
+          <template #help><span class="form-help">开启后新浏览器首次登录需要邮箱验证码；管理员账号自动豁免</span></template>
         </t-form-item>
         <t-form-item label="自动退出 Work" name="force_chat_mode">
           <t-switch v-model="formData.force_chat_mode" />
@@ -189,6 +220,59 @@
         </t-form-item>
       </t-form>
     </t-dialog>
+
+    <t-dialog
+      :visible="batchDeviceVisible"
+      header="批量设备策略"
+      :confirm-btn="{ loading: batchDeviceSubmitting }"
+      width="520px"
+      @confirm="submitBatchDevicePolicy"
+      @close="batchDeviceVisible = false"
+    >
+      <t-form :data="batchDeviceForm" label-width="100px">
+        <t-form-item label="策略来源">
+          <t-radio-group v-model="batchDeviceForm.follow_plan">
+            <t-radio :value="true">跟随套餐</t-radio>
+            <t-radio :value="false">批量覆盖</t-radio>
+          </t-radio-group>
+        </t-form-item>
+        <template v-if="!batchDeviceForm.follow_plan">
+          <t-form-item label="允许多设备"><t-switch v-model="batchDeviceForm.multi_device_enabled" /></t-form-item>
+          <t-form-item label="设备上限"><t-input-number v-model="batchDeviceForm.device_limit" :min="1" :max="50" :disabled="!batchDeviceForm.multi_device_enabled" /></t-form-item>
+        </template>
+        <t-form-item label="新设备验证"><t-switch v-model="batchDeviceForm.new_device_verification_enabled" /></t-form-item>
+      </t-form>
+    </t-dialog>
+
+    <t-dialog
+      :visible="deviceVisible"
+      :header="`${deviceUser?.username || ''} 的设备`"
+      :footer="false"
+      width="720px"
+      @close="deviceVisible = false"
+    >
+      <t-loading :loading="deviceLoading">
+        <div class="device-summary" v-if="devicePolicy">
+          <strong>{{ devicePolicy.enabled ? `允许 ${devicePolicy.limit} 台设备` : '仅允许 1 台设备' }}</strong>
+          <span>{{ devicePolicySource(devicePolicy) }}</span>
+        </div>
+        <div class="device-list">
+          <article v-for="device in deviceSessions" :key="device.id" class="device-row">
+            <div>
+              <strong>{{ deviceLabel(device) }}</strong>
+              <span>{{ device.ip_address || '未知 IP' }} · 最近活跃 {{ formatDateTime(device.last_seen_at) }}</span>
+            </div>
+            <t-space size="small">
+              <t-tag v-if="device.is_primary" size="small" variant="light">主设备</t-tag>
+              <t-popconfirm content="确定让这台设备退出登录吗？" @confirm="revokeDevice(device)">
+                <t-button theme="danger" variant="text" size="small">下线</t-button>
+              </t-popconfirm>
+            </t-space>
+          </article>
+          <div v-if="!deviceLoading && !deviceSessions.length" class="mobile-empty">暂无在线设备</div>
+        </div>
+      </t-loading>
+    </t-dialog>
   </div>
 </template>
 
@@ -209,6 +293,19 @@ const activeSubscription = ref<any>(null)
 const query = ref('')
 const statusFilter = ref('')
 const selectedRowKeys = ref<Array<number | string>>([])
+const batchDeviceVisible = ref(false)
+const batchDeviceSubmitting = ref(false)
+const deviceVisible = ref(false)
+const deviceLoading = ref(false)
+const deviceUser = ref<any>(null)
+const devicePolicy = ref<any>(null)
+const deviceSessions = ref<any[]>([])
+const batchDeviceForm = reactive({
+  follow_plan: true,
+  multi_device_enabled: true,
+  device_limit: 3,
+  new_device_verification_enabled: true
+})
 
 const pagination = reactive({
   current: 1,
@@ -224,10 +321,11 @@ const columns = [
   { colKey: 'is_active', title: '状态', cell: 'is_active', width: 80 },
   { colKey: 'model_limit', title: '模型限制', cell: 'model_limit', width: 180 },
   { colKey: 'force_chat_mode', title: 'Work 模式', cell: 'force_chat_mode', width: 110 },
+  { colKey: 'device_policy', title: '设备策略', cell: 'device_policy', width: 135 },
   { colKey: 'subscription', title: '套餐', cell: 'subscription', width: 130 },
   { colKey: 'expired_date', title: '过期日期', cell: 'expired_date', width: 120 },
   { colKey: 'remark', title: '备注', ellipsis: true },
-  { colKey: 'op', title: '操作', cell: 'op', width: 150 }
+  { colKey: 'op', title: '操作', cell: 'op', width: 180 }
 ]
 
 const formData = reactive({
@@ -237,6 +335,10 @@ const formData = reactive({
   password: '',
   is_active: true,
   isolated_session: true,
+  device_policy_managed_by_plan: true,
+  multi_device_enabled: true,
+  device_limit: 3,
+  new_device_verification_enabled: true,
   force_chat_mode: true,
   expired_date: '',
   gptcar_list: [] as number[],
@@ -248,6 +350,16 @@ const formData = reactive({
 
 const formRules = {
   username: [{ required: true, message: '请输入用户名' }]
+}
+
+const normalizedModelLimits = (value: unknown) => {
+  if (!Array.isArray(value)) return []
+  return [...new Set(
+    value
+      .filter((item): item is string => typeof item === 'string')
+      .map(item => item.trim())
+      .filter(item => item && !['[object Object]', 'undefined', 'null'].includes(item))
+  )]
 }
 
 onMounted(() => {
@@ -294,6 +406,10 @@ const showAddDialog = () => {
     password: '',
     is_active: true,
     isolated_session: true,
+    device_policy_managed_by_plan: true,
+    multi_device_enabled: true,
+    device_limit: 3,
+    new_device_verification_enabled: true,
     force_chat_mode: true,
     expired_date: '',
     gptcar_list: [],
@@ -316,15 +432,19 @@ const showEditDialog = (row: any) => {
     password: '',
     is_active: row.is_active,
     isolated_session: row.isolated_session ?? true,
+    device_policy_managed_by_plan: row.device_policy_managed_by_plan !== false,
+    multi_device_enabled: row.multi_device_enabled !== false,
+    device_limit: Number(row.device_limit || 3),
+    new_device_verification_enabled: row.new_device_verification_enabled !== false,
     force_chat_mode: row.force_chat_mode ?? true,
     expired_date: row.expired_date || '',
     gptcar_list: row.gptcar_list || [],
-    model_limit: row.model_limit || [],
+    model_limit: normalizedModelLimits(row.model_limit),
     remark: row.remark || '',
     daily_quota: Number(row.daily_quota || 0),
     monthly_quota: Number(row.monthly_quota || 0)
   })
-  modelLimitInput.value = (row.model_limit || []).join(', ')
+  modelLimitInput.value = normalizedModelLimits(row.model_limit).join(', ')
   activeSubscription.value = row.subscription || null
   dialogVisible.value = true
 }
@@ -346,6 +466,10 @@ const handleSubmit = async () => {
     email: formData.email.trim(),
     is_active: formData.is_active,
     isolated_session: formData.isolated_session,
+    device_policy_managed_by_plan: formData.device_policy_managed_by_plan,
+    multi_device_enabled: formData.multi_device_enabled,
+    device_limit: formData.multi_device_enabled ? formData.device_limit : 1,
+    new_device_verification_enabled: formData.new_device_verification_enabled,
     force_chat_mode: formData.force_chat_mode,
     gptcar_list: activeSubscription.value ? [] : formData.gptcar_list,
     model_limit: modelLimit,
@@ -396,6 +520,74 @@ const batchAction = async (action: 'activate' | 'deactivate') => {
     fetchData()
   }
 }
+
+const devicePolicySource = (policy: any) => {
+  if (policy?.source === 'plan') return policy.plan_name ? `跟随 ${policy.plan_name}` : '跟随套餐'
+  if (policy?.source === 'user') return '单独设置'
+  return '系统默认'
+}
+
+const openBatchDeviceDialog = () => {
+  Object.assign(batchDeviceForm, {
+    follow_plan: true,
+    multi_device_enabled: true,
+    device_limit: 3,
+    new_device_verification_enabled: true
+  })
+  batchDeviceVisible.value = true
+}
+
+const submitBatchDevicePolicy = async () => {
+  batchDeviceSubmitting.value = true
+  const data = await request('/0x/user/batch', 'POST', {
+    user_id_list: selectedRowKeys.value.map(Number),
+    action: batchDeviceForm.follow_plan ? 'device_follow_plan' : 'device_override',
+    multi_device_enabled: batchDeviceForm.multi_device_enabled,
+    device_limit: batchDeviceForm.multi_device_enabled ? batchDeviceForm.device_limit : 1,
+    new_device_verification_enabled: batchDeviceForm.new_device_verification_enabled
+  })
+  batchDeviceSubmitting.value = false
+  if (!data) return
+  batchDeviceVisible.value = false
+  selectedRowKeys.value = []
+  MessagePlugin.success(data.message)
+  fetchData()
+}
+
+const loadDevices = async () => {
+  if (!deviceUser.value) return
+  deviceLoading.value = true
+  const data = await request(`/0x/user/devices?user_id=${deviceUser.value.id}`)
+  deviceLoading.value = false
+  if (!data) return
+  devicePolicy.value = data.policy || null
+  deviceSessions.value = data.sessions || []
+}
+
+const openDeviceDialog = async (row: any) => {
+  deviceUser.value = row
+  devicePolicy.value = row.device_policy || null
+  deviceSessions.value = []
+  deviceVisible.value = true
+  await loadDevices()
+}
+
+const revokeDevice = async (device: any) => {
+  const data = await request('/0x/user/devices', 'DELETE', {
+    user_id: deviceUser.value.id,
+    session_id: device.id
+  })
+  if (!data) return
+  MessagePlugin.success(data.message)
+  await Promise.all([loadDevices(), fetchData()])
+}
+
+const deviceLabel = (device: any) => {
+  const type = device.device_type === 'mobile' ? '手机' : device.device_type === 'tablet' ? '平板' : '电脑'
+  return `${type} · ${device.browser_name || '其他浏览器'} · ${device.os_name || '其他系统'}`
+}
+
+const formatDateTime = (value: string) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-'
 </script>
 
 <style scoped>
@@ -421,6 +613,12 @@ const batchAction = async (action: 'activate' | 'deactivate') => {
 .subscription-cell span {
   display: block;
 }
+.device-policy-cell, .device-summary, .device-row > div { display: grid; gap: 4px; }
+.device-policy-cell strong { font-size: 13px; font-weight: 600; }
+.device-policy-cell span, .device-summary span, .device-row span { color: var(--app-text-muted); font-size: 11px; }
+.device-summary { margin-bottom: 14px; padding: 12px 14px; background: #f7f7f5; border: 1px solid var(--app-border); border-radius: 6px; }
+.device-list { display: grid; gap: 10px; }
+.device-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 14px; border: 1px solid var(--app-border); border-radius: 6px; }
 .subscription-cell strong {
   font-size: 13px;
   font-weight: 600;
@@ -432,7 +630,7 @@ const batchAction = async (action: 'activate' | 'deactivate') => {
 }
 .table-toolbar {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 160px auto auto auto;
+  grid-template-columns: minmax(220px, 1fr) 160px auto auto auto auto;
   gap: 10px;
   margin-bottom: 16px;
 }
@@ -455,5 +653,6 @@ const batchAction = async (action: 'activate' | 'deactivate') => {
   .mobile-user-actions .t-button { width: 100%; min-height: 44px; }
   .mobile-empty { padding: 28px 12px; color: var(--app-text-muted); text-align: center; }
   .mobile-pagination { justify-content: center; padding-top: 4px; }
+  .device-row { align-items: flex-start; flex-direction: column; }
 }
 </style>

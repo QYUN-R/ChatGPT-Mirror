@@ -16,18 +16,35 @@ from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.views import APIView
 
 from app.accounts.models import EmailDeliveryStatus, EmailVerificationChallenge, User
-from app.accounts.authentication import clear_auth_cookie, set_auth_cookie
+from app.accounts.authentication import (
+    active_device_sessions,
+    clear_auth_cookie,
+    device_identity,
+    device_subject,
+    ensure_device_capacity,
+    get_device_session,
+    issue_device_session,
+    registered_device_session,
+    revoke_all_device_sessions,
+    revoke_device_session,
+    set_auth_cookie,
+    set_device_id_cookie,
+)
 from app.accounts.captcha import issue_local_captcha, verify_local_captcha
 from app.accounts.email_auth import (
     EmailVerificationPurpose,
     consume_verification_challenge,
     create_verification_challenge,
     issue_binding_ticket,
+    issue_device_login_ticket,
+    load_device_login_ticket,
     load_binding_ticket,
     needs_email_binding,
     normalize_email,
 )
 from app.accounts.serializers import (
+    DeviceLoginVerificationConfirmSerializer,
+    DeviceLoginVerificationRequestSerializer,
     EmailBindingConfirmSerializer,
     EmailBindingRequestSerializer,
     EmailChangeConfirmSerializer,
@@ -36,6 +53,7 @@ from app.accounts.serializers import (
     PasswordResetConfirmSerializer,
     UserRegisterSerializer,
 )
+from app.accounts.device_policy import effective_device_policy
 from app.chatgpt.models import ChatgptAccount
 from app.settings import ADMIN_USERNAME, FREE_ACCOUNT_USERNAME
 from app.settings import (
@@ -48,6 +66,14 @@ from app.utils import get_client_ip, get_request_subject, issue_free_session, sa
 
 
 TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+
+
+def mask_email(value):
+    local, _, domain = str(value or "").partition("@")
+    if not local or not domain:
+        return ""
+    visible = local[:2] if len(local) > 2 else local[:1]
+    return f"{visible}{'*' * max(2, len(local) - len(visible))}@{domain}"
 
 
 def verify_turnstile(request, expected_action):
@@ -163,10 +189,23 @@ def issue_user_token(user, *, rotate=False):
     return token
 
 
-def _authenticated_response(request, user):
-    user.last_login = timezone.now()
-    user.save(update_fields=["last_login"])
-    token = issue_user_token(user, rotate=True)
+def _authenticated_response(request, user, *, device_verified=False):
+    with transaction.atomic():
+        user = User.objects.select_for_update().get(pk=user.pk)
+        user.last_login = timezone.now()
+        user.save(update_fields=["last_login"])
+        token = issue_user_token(user)
+        device_token, device_id, _device_session, revoked_subjects = issue_device_session(
+            request,
+            user,
+            verified=device_verified,
+        )
+
+    for subject in revoked_subjects:
+        try:
+            req_gateway("post", "/api/logout", json={"user_name": subject})
+        except ValidationError:
+            pass
     request.user = user
     save_visit_log(request, "login")
     rotate_token(request)
@@ -180,7 +219,7 @@ def _authenticated_response(request, user):
     if user.is_staff or user.is_superuser:
         result["is_admin"] = True
     response = Response(result)
-    set_auth_cookie(response, token)
+    set_auth_cookie(response, token, device_token, device_id)
     return response
 
 
@@ -203,10 +242,12 @@ def _find_login_user(identifier):
 
 def _revoke_user_tokens(user):
     Token.objects.filter(user=user).delete()
-    try:
-        req_gateway("post", "/api/logout", json={"user_name": user.username})
-    except ValidationError:
-        pass
+    subjects = revoke_all_device_sessions(user)
+    for subject in subjects or [user.username]:
+        try:
+            req_gateway("post", "/api/logout", json={"user_name": subject})
+        except ValidationError:
+            pass
 
 
 class UserFreeLoginView(APIView):
@@ -276,6 +317,25 @@ class AccountLogin(APIView):
                 "username": user.username,
                 "message": "请先完成邮箱验证后继续使用",
             })
+        policy = effective_device_policy(user)
+        ensure_device_capacity(request, user, policy)
+        registered = registered_device_session(request, user)
+        requires_verification = (
+            policy["new_device_verification_enabled"]
+            and not (user.is_staff or user.is_superuser)
+            and (not registered or not registered.verified_at)
+        )
+        if requires_verification:
+            device_id, device_key_hash = device_identity(request)
+            response = Response({
+                "authenticated": False,
+                "device_verification_required": True,
+                "device_ticket": issue_device_login_ticket(user, device_key_hash),
+                "masked_email": mask_email(user.email),
+                "message": "检测到新设备，请完成邮箱验证",
+            })
+            set_device_id_cookie(response, device_id)
+            return response
         return _authenticated_response(request, user)
 
 
@@ -289,13 +349,73 @@ class AccountLogout(APIView):
         except ValidationError:
             pass
 
-        if request.user.username != FREE_ACCOUNT_USERNAME and request.auth:
-            Token.objects.filter(key=str(request.auth)).delete()
+        if request.user.username != FREE_ACCOUNT_USERNAME:
+            revoked_session = revoke_device_session(request, request.user)
+            if request.auth and (
+                not revoked_session or not active_device_sessions(request.user).exists()
+            ):
+                Token.objects.filter(key=str(request.auth)).delete()
 
         response = Response({"message": "退出成功"})
         response.delete_cookie("free_session", path="/", samesite="Strict")
         clear_auth_cookie(response)
         return response
+
+
+class DeviceLoginVerificationRequestView(APIView):
+    authentication_classes = ()
+    throttle_classes = (EmailVerificationIpRateThrottle, EmailVerificationAddressRateThrottle)
+
+    def post(self, request):
+        serializer = DeviceLoginVerificationRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user, expected_device_key_hash = load_device_login_ticket(
+            serializer.validated_data["device_ticket"]
+        )
+        _device_id, current_device_key_hash = device_identity(request)
+        if current_device_key_hash != expected_device_key_hash:
+            raise ValidationError({"message": "新设备验证会话无效，请重新登录"})
+        policy = effective_device_policy(user)
+        ensure_device_capacity(request, user, policy)
+        challenge = create_verification_challenge(
+            email=user.email,
+            purpose=EmailVerificationPurpose.DEVICE_LOGIN,
+            user=user,
+            ip_address=get_client_ip(request),
+        )
+        return Response(
+            {
+                "message": "验证码正在发送，请查收邮箱",
+                "challenge_id": str(challenge.challenge_id),
+                "delivery_status": challenge.delivery_status,
+                "masked_email": mask_email(user.email),
+            },
+            status=202,
+        )
+
+
+class DeviceLoginVerificationConfirmView(APIView):
+    authentication_classes = ()
+    throttle_classes = (EmailVerificationAttemptRateThrottle,)
+
+    def post(self, request):
+        serializer = DeviceLoginVerificationConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user, expected_device_key_hash = load_device_login_ticket(
+            serializer.validated_data["device_ticket"]
+        )
+        _device_id, current_device_key_hash = device_identity(request)
+        if current_device_key_hash != expected_device_key_hash:
+            raise ValidationError({"message": "新设备验证会话无效，请重新登录"})
+        policy = effective_device_policy(user)
+        ensure_device_capacity(request, user, policy)
+        consume_verification_challenge(
+            purpose=EmailVerificationPurpose.DEVICE_LOGIN,
+            user=user,
+            email=user.email,
+            code=serializer.validated_data["verification_code"],
+        )
+        return _authenticated_response(request, user, device_verified=True)
 
 
 class AccountRegister(APIView):
@@ -353,7 +473,7 @@ class AccountRegister(APIView):
                     password=data["password"],
                     gptcar_list=[chatgptcar.id],
                 )
-        return _authenticated_response(request, user)
+        return _authenticated_response(request, user, device_verified=True)
 
 
 class EmailVerificationRequestView(APIView):
@@ -488,7 +608,7 @@ class EmailBindingConfirmView(APIView):
                 user.save(update_fields=["email", "email_verified_at"])
             except IntegrityError as exc:
                 raise ValidationError({"email": "该邮箱已被其他账户使用"}) from exc
-        return _authenticated_response(request, user)
+        return _authenticated_response(request, user, device_verified=True)
 
 
 class EmailVerificationStatusView(APIView):
@@ -577,4 +697,4 @@ class EmailChangeConfirmView(APIView):
             )
 
         _revoke_user_tokens(request.user)
-        return _authenticated_response(request, request.user)
+        return _authenticated_response(request, request.user, device_verified=True)

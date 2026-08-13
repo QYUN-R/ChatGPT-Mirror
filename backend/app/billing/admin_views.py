@@ -131,11 +131,14 @@ class AdminPlanView(APIView):
                 user_limit = int(request.data.get("user_limit") or 0)
                 daily_quota = int(request.data.get("daily_quota") or 0)
                 monthly_quota = int(request.data.get("monthly_quota") or 0)
+                device_limit = int(request.data.get("device_limit") or 1)
                 sort_order = int(request.data.get("sort_order") or 0)
             except (TypeError, ValueError):
                 raise ValidationError({"message": "套餐限额和排序必须是整数"})
             if min(user_limit, daily_quota, monthly_quota, sort_order) < 0:
                 raise ValidationError({"message": "套餐限额和排序不能小于 0"})
+            if not 1 <= device_limit <= 50:
+                raise ValidationError({"device_limit": "设备上限必须在 1 到 50 之间"})
             with transaction.atomic():
                 if auto_convertible_pools:
                     ChatgptCar.objects.filter(id__in=auto_convertible_pools).update(is_commercial=True)
@@ -145,16 +148,24 @@ class AdminPlanView(APIView):
                     or plan.daily_quota != daily_quota
                     or plan.monthly_quota != monthly_quota
                 )
+                device_policy_changed = (
+                    not plan.pk
+                    or plan.multi_device_enabled != bool(request.data.get("multi_device_enabled", True))
+                    or plan.device_limit != device_limit
+                )
                 if plan.pk and plan.redemption_batches.exists() and plan.pool_tier != requested_tier:
                     raise ValidationError({"pool_tier": "已有卡密批次的套餐不能更换等级"})
                 plan.code = str(request.data.get("code") or "").strip()
                 plan.name = str(request.data.get("name") or "").strip()
-                plan.tagline = str(request.data.get("tagline") or "").strip()
+                if "tagline" in request.data or not plan.pk:
+                    plan.tagline = str(request.data.get("tagline") or "").strip()
                 plan.pool = requested_pool
                 plan.pool_tier = requested_tier
                 plan.user_limit = user_limit
                 plan.daily_quota = daily_quota
                 plan.monthly_quota = monthly_quota
+                plan.multi_device_enabled = bool(request.data.get("multi_device_enabled", True))
+                plan.device_limit = device_limit
                 plan.is_active = bool(request.data.get("is_active", True))
                 plan.is_public = bool(request.data.get("is_public", True))
                 plan.sort_order = sort_order
@@ -183,6 +194,19 @@ class AdminPlanView(APIView):
                 except DjangoValidationError as exc:
                     raise ValidationError(exc.message_dict)
                 plan = Plan.objects.select_related("pool").prefetch_related("offers", "pool_links__pool").get(pk=plan.pk)
+                affected_user_ids = list(
+                    User.objects.filter(
+                        billing_subscription__plan=plan,
+                        billing_subscription__status="ACTIVE",
+                        billing_subscription__ends_at__gt=timezone.now(),
+                        device_policy_managed_by_plan=True,
+                    ).values_list("id", flat=True)
+                ) if device_policy_changed else []
+            if affected_user_ids:
+                from app.accounts.device_policy import enforce_device_policy_with_gateway
+
+                for affected_user in User.objects.filter(pk__in=affected_user_ids):
+                    enforce_device_policy_with_gateway(affected_user)
             return Response({"plan": PlanSerializer(plan, context={"admin": True}).data})
         if action == "save_offer":
             offer = PlanOffer.objects.filter(pk=request.data.get("id")).first() or PlanOffer()

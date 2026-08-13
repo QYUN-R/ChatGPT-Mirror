@@ -21,6 +21,18 @@ const extractLoginError = (error: any): string => {
   return '登录失败'
 }
 
+const parseJsonResponse = async (response: Response) => {
+  const text = await response.text()
+  if (!text) return null
+
+  try {
+    return JSON.parse(text)
+  } catch {
+    const isServerFailure = response.status >= 500
+    throw new Error(isServerFailure ? '系统异常，请稍后重试' : '服务响应异常，请刷新后重试')
+  }
+}
+
 export const useUserStore = defineStore('user', () => {
   const authenticated = ref(false)
   const isAdmin = ref(false)
@@ -40,6 +52,15 @@ export const useUserStore = defineStore('user', () => {
     csrfToken.value = token
   }
 
+  const applySession = (result: any) => {
+    if (!result || typeof result !== 'object') return false
+    authenticated.value = Boolean(result.authenticated)
+    isAdmin.value = Boolean(result.is_admin)
+    username.value = result.username || ''
+    csrfToken.value = result.csrf_token || ''
+    return authenticated.value
+  }
+
   const login = async (url: string, data: any) => {
     const response = await fetch(url, {
       method: 'POST',
@@ -51,33 +72,30 @@ export const useUserStore = defineStore('user', () => {
     })
 
     if (!response.ok) {
-      const error = await response.json()
+      const error = await parseJsonResponse(response)
       throw new Error(extractLoginError(error))
     }
 
-    const result = await response.json()
+    const result = await parseJsonResponse(response)
+    if (!result || typeof result !== 'object') {
+      throw new Error('服务响应异常，请刷新后重试')
+    }
     
-    authenticated.value = Boolean(result.authenticated)
-    setUsername(result.username || data.username || '')
-    setIsAdmin(Boolean(result.is_admin))
-    setCsrfToken(result.csrf_token || '')
+    applySession(result)
+    if (!username.value) setUsername(data.username || data.identifier || '')
     hydrated = true
 
     return result
   }
 
-  const hydrate = async () => {
-    if (hydrated) return authenticated.value
+  const hydrate = async (force = false) => {
+    if (hydrated && !force) return authenticated.value
     hydrated = true
     try {
       const response = await fetch('/0x/user/me', { credentials: 'include' })
       if (!response.ok) return false
-      const result = await response.json()
-      authenticated.value = Boolean(result.authenticated)
-      isAdmin.value = Boolean(result.is_admin)
-      username.value = result.username || ''
-      csrfToken.value = result.csrf_token || ''
-      return authenticated.value
+      const result = await parseJsonResponse(response)
+      return applySession(result)
     } catch {
       return false
     }
@@ -85,7 +103,7 @@ export const useUserStore = defineStore('user', () => {
 
   const logout = async () => {
     const activeCsrfToken =
-      csrfToken.value || document.cookie.match(/(?:^|; )csrftoken=([^;]*)/)?.[1] || ''
+      document.cookie.match(/(?:^|; )csrftoken=([^;]*)/)?.[1] || csrfToken.value || ''
     if (authenticated.value) {
       try {
         await fetch('/0x/user/logout', {
