@@ -63,6 +63,7 @@ services:
       DJANGO_CACHE_URL: "${DJANGO_CACHE_URL:-redis://redis:6379/2}"
       EMAIL_HOST_PASSWORD_FILE: "${EMAIL_HOST_PASSWORD_FILE:-/run/secrets/qq_smtp_password}"
       PUBLIC_SITE_URL: "${PUBLIC_SITE_URL:-https://www.tuwugpt.com}"
+      GATEWAY_SESSION_DATABASE_PATH: "${GATEWAY_SESSION_DATABASE_PATH:-/app/gateway-data/chatgpt_mirror.db}"
     ulimits:
       nofile:
         soft: 65535

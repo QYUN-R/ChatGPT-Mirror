@@ -213,6 +213,7 @@ declare global {
 }
 
 const BINDING_TICKET_STORAGE_KEY = 'chat2.email-binding-ticket'
+const PUBLIC_AUTH_PATHS = new Set(['/login', '/register', '/forgot-password', '/bind-email'])
 const userStore = useUserStore()
 const route = useRoute()
 const router = useRouter()
@@ -254,6 +255,16 @@ let turnstileScriptPromise: Promise<void> | null = null
 let cooldownTimer: number | null = null
 let verificationDeliveryTimer: number | null = null
 let verificationDeliveryPollVersion = 0
+
+const postLoginRedirect = () => {
+  const value = Array.isArray(route.query.redirect) ? route.query.redirect[0] : route.query.redirect
+  if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//') || value.includes('\\')) {
+    return ''
+  }
+  const resolved = router.resolve(value)
+  if (PUBLIC_AUTH_PATHS.has(resolved.path)) return ''
+  return resolved.fullPath
+}
 
 const isRegister = computed(() => route.path === '/register')
 const isForgotPassword = computed(() => route.path === '/forgot-password')
@@ -490,6 +501,11 @@ const requestVerificationCode = async () => {
 }
 
 const goAfterAuthentication = async () => {
+  const redirect = postLoginRedirect()
+  if (redirect) {
+    await router.replace(redirect)
+    return
+  }
   if (userStore.isAdmin) {
     await router.push({ name: 'User' })
     return
@@ -526,7 +542,8 @@ const onSubmit = async ({ validateResult }: any) => {
       })
       if (data.email_binding_required && data.binding_ticket) {
         sessionStorage.setItem(BINDING_TICKET_STORAGE_KEY, data.binding_ticket)
-        await router.replace('/bind-email')
+        const redirect = postLoginRedirect()
+        await router.replace({ path: '/bind-email', query: redirect ? { redirect } : undefined })
         return
       }
       if (data.device_verification_required && data.device_ticket) {

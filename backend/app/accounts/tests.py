@@ -57,6 +57,7 @@ from app.chatgpt.models import ChatgptAccount
 from app.chatgpt.serializers import ShowChatgptTokenSerializer
 from app.settings import ADMIN_USERNAME, FREE_ACCOUNT_USERNAME
 from app.utils import get_client_ip, req_gateway
+from cli.create_init_user import ensure_initial_users
 
 
 class SecurityRegressionTests(TestCase):
@@ -66,6 +67,29 @@ class SecurityRegressionTests(TestCase):
     def test_force_chat_mode_is_enabled_for_new_users(self):
         user = User.objects.create_user(username="work-mode-user", password="Strong-password-123!")
         self.assertTrue(user.force_chat_mode)
+
+    def test_repeated_initialization_preserves_existing_admin_password(self):
+        current_password = "Current-admin-password-123!"
+        user = User.objects.create_user(
+            username="bootstrap-admin",
+            password=current_password,
+            is_staff=False,
+            is_superuser=False,
+            is_active=False,
+        )
+
+        ensure_initial_users(
+            admin_username="bootstrap-admin",
+            admin_password="Environment-password-123!",
+            free_username="bootstrap-free",
+        )
+
+        user.refresh_from_db()
+        self.assertTrue(user.check_password(current_password))
+        self.assertFalse(user.check_password("Environment-password-123!"))
+        self.assertTrue(user.is_staff)
+        self.assertTrue(user.is_superuser)
+        self.assertTrue(user.is_active)
 
     def test_model_limits_drop_object_values_and_legacy_placeholders(self):
         self.assertEqual(
@@ -225,7 +249,7 @@ class SecurityRegressionTests(TestCase):
     @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
     @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
     @patch("app.accounts.views.login.req_gateway", return_value={"message": "ok"})
-    def test_multi_device_login_keeps_both_devices_and_uses_distinct_subjects(self, _req_gateway):
+    def test_multi_device_login_keeps_both_devices_and_shares_chat_subject(self, _req_gateway):
         user = User.objects.create_user(
             username="multi-device-user",
             email="multi-device-user@qq.com",
@@ -269,10 +293,11 @@ class SecurityRegressionTests(TestCase):
             HTTP_COOKIE=f"{DEVICE_COOKIE_NAME}={second_client.cookies[DEVICE_COOKIE_NAME].value}",
         )
         second_request.user = user
-        self.assertNotEqual(
+        self.assertEqual(
             get_request_subject(first_request),
             get_request_subject(second_request),
         )
+        self.assertEqual(get_request_subject(first_request), user.username)
 
     @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
     @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)
@@ -303,6 +328,7 @@ class SecurityRegressionTests(TestCase):
             UserDeviceSession.objects.filter(user=user, revoked_at__isnull=True).count(),
             1,
         )
+        _req_gateway.assert_not_called()
 
     @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)
     @patch("app.accounts.views.login.TURNSTILE_ENABLED", False)

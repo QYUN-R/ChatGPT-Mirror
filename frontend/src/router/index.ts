@@ -15,6 +15,13 @@ function clearAccessibleCookies(): void {
   }
 }
 
+function loginRedirect(fullPath: string) {
+  return {
+    path: '/login',
+    query: fullPath && fullPath !== '/login' ? { redirect: fullPath } : undefined
+  }
+}
+
 async function hasRequiredAnnouncement(): Promise<boolean> {
   try {
     const response = await fetch(
@@ -210,6 +217,10 @@ router.beforeEach(async (to, _from, next) => {
   }
 
   const authenticated = await userStore.hydrate()
+  if (to.path === '/login-chatgpt' && !authenticated) {
+    next(loginRedirect(to.fullPath))
+    return
+  }
   if (to.path === '/account/overview' && authenticated && !userStore.isAdmin) {
     next('/account/billing')
     return
@@ -222,7 +233,7 @@ router.beforeEach(async (to, _from, next) => {
     if (authenticated && !userStore.isAdmin) {
       clearAccessibleCookies()
     }
-    next('/login')
+    next(loginRedirect(to.fullPath))
     return
   }
 
@@ -232,7 +243,7 @@ router.beforeEach(async (to, _from, next) => {
   }
   
   if (!isPublicAuthPage && to.path !== '/login-chatgpt' && !authenticated) {
-    next('/login')
+    next(loginRedirect(to.fullPath))
   } else {
     next()
   }

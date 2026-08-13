@@ -1009,6 +1009,9 @@ def archive_upstream_account(account, *, actor=None):
 def _web_probe_invalidates_credentials(error_code):
     return str(error_code or "").strip().lower() in {
         "token_invalidated",
+        "token_revoked",
+        "session_expired",
+        "expired_session",
         "invalid_authentication",
         "authentication_token_invalid",
     }
@@ -1216,6 +1219,33 @@ def managed_account_options(user):
     return assignment, options
 
 
+def managed_account_catalog(user):
+    if not billing_enabled() or user.is_staff or user.is_superuser:
+        return None, [], False
+    subscription = refresh_subscription_state(user)
+    if not subscription:
+        if billing_enforced():
+            raise SubscriptionInactive("当前账号尚未开通套餐")
+        return None, [], False
+    if not subscription.is_service_active:
+        raise SubscriptionInactive("套餐已到期或暂停，请先续费")
+
+    assignment = AccountAssignment.objects.select_related("account").filter(
+        subscription=subscription,
+        active=True,
+    ).first()
+    policies = list(
+        PoolAccountPolicy.objects.select_related("account", "pool")
+        .filter(
+            pool_id__in=plan_pool_ids(subscription.plan),
+            tier=subscription.plan.pool_tier,
+            account__is_archived=False,
+        )
+        .order_by("pool_id", "account_id")
+    )
+    return assignment, policies, True
+
+
 def resolve_managed_account(user, *, preferred_policy_id=None):
     if not billing_enabled() or user.is_staff or user.is_superuser:
         return None
@@ -1409,13 +1439,14 @@ def refresh_pool_health():
                     public_url=settings.PUBLIC_SITE_URL,
                 )
                 if not web_healthy and _web_probe_invalidates_credentials(web_error):
+                    policy.account.auth_status = False
                     policy.account.access_token_valid = False
                     policy.account.session_token_valid = False
                 if not web_healthy:
                     policy.account.last_error = web_error
                     update_fields = ["last_error", "updated_time"]
                     if _web_probe_invalidates_credentials(web_error):
-                        update_fields.extend(["access_token_valid", "session_token_valid"])
+                        update_fields.extend(["auth_status", "access_token_valid", "session_token_valid"])
                     policy.account.save(update_fields=update_fields)
             policy.health_status = (
                 "HEALTHY"

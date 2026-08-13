@@ -128,11 +128,14 @@ def issue_device_session(request, user, *, policy=None, verified=False):
     )
 
     if not policy["enabled"]:
-        revoked_subjects = [
-            device_subject(user, session)
-            for session in active_sessions.exclude(pk=getattr(registered_session, "pk", None))
-        ]
-        active_sessions.exclude(pk=getattr(registered_session, "pk", None)).update(revoked_at=now)
+        revoked_sessions = list(
+            active_sessions.exclude(pk=getattr(registered_session, "pk", None))
+        )
+        if revoked_sessions:
+            UserDeviceSession.objects.filter(
+                pk__in=[session.pk for session in revoked_sessions]
+            ).update(revoked_at=now)
+            revoked_subjects = [user.username]
     elif not current_is_active and active_sessions.count() >= policy["limit"]:
         raise AuthenticationFailed(
             f"已达到 {policy['limit']} 台设备上限，请先在账户中心移除旧设备"
@@ -149,13 +152,14 @@ def issue_device_session(request, user, *, policy=None, verified=False):
         session.ip_address = _request_ip(request)
         session.expires_at = now + timedelta(seconds=settings.API_TOKEN_TTL_SECONDS)
         session.revoked_at = None
+        session.gateway_subject = user.username
         if verified and not session.verified_at:
             session.verified_at = now
         session.save()
     else:
         is_primary = not UserDeviceSession.objects.filter(user=user, is_primary=True).exists()
         subject_id = uuid.uuid4()
-        gateway_subject = user.username if is_primary else f"{user.username}:device:{subject_id}"
+        gateway_subject = user.username
         session = UserDeviceSession.objects.create(
             user=user,
             token_hash=_device_token_hash(raw_token),
@@ -243,12 +247,9 @@ def revoke_all_device_sessions(user):
         revoked_at__isnull=True,
         expires_at__gt=now,
     )
-    subjects = [
-        device_subject(user, session)
-        for session in active_sessions.only("subject_id")
-    ]
+    had_active_sessions = active_sessions.exists()
     active_sessions.update(revoked_at=now)
-    return subjects
+    return [user.username] if had_active_sessions else []
 
 
 def revoke_registered_device_sessions(user, *, keep_count):
@@ -263,15 +264,11 @@ def revoke_registered_device_sessions(user, *, keep_count):
     revoked = active_sessions[max(int(keep_count or 1), 1):]
     if revoked:
         UserDeviceSession.objects.filter(pk__in=[item.pk for item in revoked]).update(revoked_at=now)
-    return [device_subject(user, item) for item in revoked]
+    return [user.username] if revoked else []
 
 
 def device_subject(user, session):
-    if not session:
-        return user.username
-    return session.gateway_subject or (
-        user.username if session.is_primary else f"{user.username}:device:{session.subject_id.hex}"
-    )
+    return user.username
 
 
 def _request_ip(request):

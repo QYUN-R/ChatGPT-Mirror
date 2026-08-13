@@ -64,12 +64,14 @@ services:
       ALLOW_REGISTER: "${ALLOW_REGISTER:-true}"
       FREE_ACCOUNT_USERNAME: "${FREE_ACCOUNT_USERNAME:-free_account}"
       CHATGPT_GATEWAY_URL: "http://chatgpt-mirror:${PORT:-40002}"
+      GATEWAY_SESSION_DATABASE_PATH: "${GATEWAY_SESSION_DATABASE_PATH:-/app/gateway-data/chatgpt_mirror.db}"
       CLOUDFLARE_TURNSTILE: "${CLOUDFLARE_TURNSTILE:-local}"
       CLOUDFLARE_TURNSTILE_SITE_KEY: "${CLOUDFLARE_TURNSTILE_SITE_KEY:-}"
       CLOUDFLARE_TURNSTILE_SECRET_KEY: "${CLOUDFLARE_TURNSTILE_SECRET_KEY:-}"
     volumes:
       - ./backend/logs:/app/backend/logs
       - ./backend/db:/app/backend/db
+      - ./data:/app/gateway-data:ro
     healthcheck:
       test:
         - CMD

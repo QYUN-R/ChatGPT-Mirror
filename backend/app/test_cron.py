@@ -134,5 +134,7 @@ class UpdateAccessTokenTests(TestCase):
 
     def test_only_explicit_auth_errors_invalidate_stored_credentials(self):
         self.assertTrue(_web_probe_invalidates_credentials("token_invalidated"))
+        self.assertTrue(_web_probe_invalidates_credentials("token_revoked"))
+        self.assertTrue(_web_probe_invalidates_credentials("session_expired"))
         self.assertFalse(_web_probe_invalidates_credentials("ReadTimeout"))
         self.assertFalse(_web_probe_invalidates_credentials("status_503"))

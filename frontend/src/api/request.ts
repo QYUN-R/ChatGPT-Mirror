@@ -93,8 +93,13 @@ const request = async (url: string, method = 'GET', body?: any, csrfRetry = true
     }
 
     if (response.status === 401) {
-      userStore.logout()
-      router.push('/login')
+      const currentRoute = router.currentRoute.value
+      const redirect = currentRoute.path === '/login' ? '' : currentRoute.fullPath
+      await userStore.logout()
+      await router.push({
+        path: '/login',
+        query: redirect ? { redirect } : undefined
+      })
       return null
     }
 

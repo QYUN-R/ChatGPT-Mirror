@@ -57,9 +57,9 @@ def enforce_device_policy_with_gateway(user):
     from app.utils import req_gateway
 
     revoked_subjects = enforce_device_policy(user)
-    for subject in revoked_subjects:
+    if revoked_subjects:
         try:
-            req_gateway("post", "/api/logout", json={"user_name": subject})
+            req_gateway("post", "/api/logout", json={"user_name": user.username})
         except ValidationError:
             pass
     return revoked_subjects

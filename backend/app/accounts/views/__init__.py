@@ -17,7 +17,6 @@ from app.accounts.serializers import ShowVisitLogModelSerializer, AddUserAccount
 from app.accounts.authentication import (
     active_device_sessions,
     clear_auth_cookie,
-    device_subject,
     get_device_session,
     issue_device_session,
     revoke_all_device_sessions,
@@ -32,7 +31,7 @@ from app.accounts.email_auth import has_verified_email, issue_binding_ticket
 from app.accounts.model_limits import normalize_model_limits
 from app.accounts.views.login import issue_user_token
 from app.billing.exceptions import BillingError
-from app.billing.services import audit, has_managed_subscription, managed_account_options, resolve_managed_account
+from app.billing.services import audit, has_managed_subscription, managed_account_catalog, resolve_managed_account
 from app.accounts.device_policy import (
     effective_device_policy,
     enforce_device_policy_with_gateway,
@@ -125,12 +124,18 @@ class UserChatGPTAccountList(APIView):
     def get(self, request):
         results = []
         try:
-            managed_assignment, managed_policies = managed_account_options(request.user)
+            managed_assignment, managed_policies, managed = managed_account_catalog(request.user)
         except BillingError as exc:
             raise ValidationError({"message": exc.message, "code": exc.code})
-        managed = managed_assignment is not None
         user_gpt_list = (
-            [policy.account for policy in managed_policies]
+            [
+                policy.account
+                for policy in managed_policies
+                if (
+                    policy.enabled and policy.health_status == "HEALTHY"
+                    or managed_assignment and policy.account_id == managed_assignment.account_id
+                )
+            ]
             if managed
             else list(ChatgptAccount.get_by_gptcar_list(request.user.gptcar_list))
         )
@@ -139,6 +144,10 @@ class UserChatGPTAccountList(APIView):
                 account.refresh_auth_diagnostics()
             except Exception:
                 pass
+            account.refresh_from_db()
+            policy = next((item for item in managed_policies if item.account_id == account.id), None)
+            if policy and policy.health_status != "HEALTHY" and account.auth_status:
+                account.auth_status = False
         chatgpt_list = [i.chatgpt_username for i in user_gpt_list]
 
         try:
@@ -146,10 +155,11 @@ class UserChatGPTAccountList(APIView):
         except:
             use_count_dict = {}
 
-        auth_user_gpt_list = [i for i in user_gpt_list if i.auth_status]
         current_minute = datetime.now().minute
 
-        visible_accounts = auth_user_gpt_list or user_gpt_list
+        visible_accounts = user_gpt_list if managed else (
+            [i for i in user_gpt_list if i.auth_status] or user_gpt_list
+        )
         policy_by_account_id = {policy.account_id: policy for policy in managed_policies}
         for index, line in enumerate(visible_accounts, start=1):
             gpt_use_count_dict = use_count_dict.get(line.chatgpt_username, {}).get("gpt-4o", {})
@@ -172,7 +182,11 @@ class UserChatGPTAccountList(APIView):
                 "supported_login_modes": supported_login_modes,
                 "default_login_mode": "web",
                 "managed_assignment": managed,
-                "is_current": bool(managed and managed_assignment.account_id == line.id),
+                "is_current": bool(managed_assignment and managed_assignment.account_id == line.id),
+                "health_status": policy_by_account_id[line.id].health_status if managed else (
+                    "HEALTHY" if line.auth_status and supported_login_modes else "DEGRADED"
+                ),
+                "last_error": str(line.last_error or ""),
             })
 
         return Response({"results": results, "managed_assignment": managed})
@@ -572,15 +586,18 @@ class DeviceSessionView(APIView):
         current = get_device_session(request, request.user, touch=False) if target_user == request.user else None
         session.revoked_at = timezone.now()
         session.save(update_fields=["revoked_at"])
-        try:
-            req_gateway("post", "/api/logout", json={"user_name": device_subject(target_user, session)})
-        except ValidationError:
-            pass
+        has_remaining_devices = active_device_sessions(target_user).exists()
+        if session != current or not has_remaining_devices:
+            try:
+                req_gateway("post", "/api/logout", json={"user_name": target_user.username})
+            except ValidationError:
+                pass
         response = Response({"message": "设备已下线", "current_device_revoked": session == current})
         if session == current:
             if not active_device_sessions(request.user).exists() and request.auth:
                 Token.objects.filter(key=str(request.auth)).delete()
             clear_auth_cookie(response)
+            response.delete_cookie("mirror_token", path="/", samesite="Lax")
         return response
 
 

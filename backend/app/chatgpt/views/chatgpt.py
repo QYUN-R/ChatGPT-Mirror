@@ -3,16 +3,17 @@ import time
 import jwt
 from django.db import transaction
 from rest_framework import generics
-from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from app.chatgpt.models import ChatgptAccount, ChatgptCar
+from app.chatgpt.gateway_sessions import gateway_session_identity, shared_gateway_login
 from app.chatgpt.serializers import ShowChatgptTokenSerializer, AddChatgptTokenSerializer, ChatGPTLoginSerializer, \
     UpdateChatgptInfoSerializer, DeleteChatgptAccountSerializer, CheckChatgptTokenExpirySerializer, \
     RefreshChatgptTokenSerializer
 from app.page import DefaultPageNumberPagination
-from app.settings import CHATGPT_GATEWAY_URL
+from app.settings import CHATGPT_GATEWAY_URL, PUBLIC_SITE_URL
 from app.utils import get_request_subject, redact_sensitive_data, save_visit_log, req_gateway
 from app.accounts.models import User
 from app.accounts.model_limits import normalize_model_limits
@@ -21,7 +22,15 @@ from django.utils import timezone
 
 from app.billing.exceptions import BillingError
 from app.billing.models import supports_commercial_pool_account
-from app.billing.services import archive_upstream_account, managed_account_options, record_usage, resolve_managed_account
+from app.billing.services import (
+    _web_probe_invalidates_credentials,
+    audit,
+    archive_upstream_account,
+    refresh_subscription_state,
+    managed_account_options,
+    record_usage,
+    resolve_managed_account,
+)
 
 DEFAULT_REFRESH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
@@ -289,7 +298,12 @@ class ChatGPTLoginView(APIView):
             "force_chat_mode": request.user.force_chat_mode,
         }
         # print(payload)
-        res_json = req_gateway("post", "/api/login", json=payload)
+        res_json = shared_gateway_login(
+            request.user,
+            chatgpt,
+            payload,
+            lambda login_payload: req_gateway("post", "/api/login", json=login_payload),
+        )
 
         save_visit_log(request, "choose-gpt", chatgpt.chatgpt_username)
         if managed:
@@ -301,3 +315,74 @@ class ChatGPTLoginView(APIView):
             if key in res_json
         }
         return Response(safe_response)
+
+
+class ChatGPTSessionFailureView(APIView):
+    authentication_classes = ()
+    permission_classes = (AllowAny,)
+
+    def post(self, request):
+        identity = gateway_session_identity(request.COOKIES.get("mirror_token"))
+        if not identity:
+            return Response({"message": "已返回账号选择页"})
+        user = User.objects.filter(
+            username=identity.get("user_name"),
+            is_active=True,
+        ).first()
+        if not user:
+            return Response({"message": "已返回账号选择页"})
+
+        error_code = str(request.data.get("error_code") or "session_expired").strip().lower()
+        if not _web_probe_invalidates_credentials(error_code):
+            error_code = "session_expired"
+
+        subscription = refresh_subscription_state(user)
+        if not subscription or not subscription.is_service_active:
+            return Response({"message": "已返回账号选择页"})
+
+        from app.billing.models import AccountAssignment, PoolAccountPolicy
+        from app.cron import probe_web_session
+
+        assignment = AccountAssignment.objects.select_related("account").filter(
+            subscription=subscription,
+            active=True,
+        ).first()
+        if not assignment:
+            return Response({"message": "已返回账号选择页"})
+        account = assignment.account
+        if account.chatgpt_username != identity.get("chatgpt_username"):
+            return Response({"message": "已返回账号选择页"})
+        verified_error = account.last_error if _web_probe_invalidates_credentials(account.last_error) else ""
+        if not verified_error and PUBLIC_SITE_URL:
+            healthy, probe_error = probe_web_session(account, public_url=PUBLIC_SITE_URL)
+            if healthy or not _web_probe_invalidates_credentials(probe_error):
+                return Response({"message": "已返回账号选择页"})
+            verified_error = probe_error
+        if not verified_error:
+            return Response({"message": "已返回账号选择页"})
+
+        with transaction.atomic():
+            account = ChatgptAccount.objects.select_for_update().get(pk=account.pk)
+            policy = PoolAccountPolicy.objects.select_for_update().get(account=account)
+            account.auth_status = False
+            account.access_token_valid = False
+            account.session_token_valid = False
+            account.last_error = verified_error
+            account.updated_time = int(time.time())
+            account.save(update_fields=[
+                "auth_status",
+                "access_token_valid",
+                "session_token_valid",
+                "last_error",
+                "updated_time",
+            ])
+            policy.health_status = "DEGRADED"
+            policy.last_health_check_at = timezone.now()
+            policy.save(update_fields=["health_status", "last_health_check_at", "updated_at"])
+            audit(
+                "chatgpt_account.session_invalidated",
+                account,
+                actor=user,
+                detail={"error_code": verified_error},
+            )
+        return Response({"message": "失效账号已移出可用列表"})

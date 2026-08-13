@@ -20,7 +20,6 @@ from app.accounts.authentication import (
     active_device_sessions,
     clear_auth_cookie,
     device_identity,
-    device_subject,
     ensure_device_capacity,
     get_device_session,
     issue_device_session,
@@ -343,21 +342,25 @@ class AccountLogout(APIView):
     permission_classes = (IsAuthenticated,)
 
     def post(self, request):
-        user_name = get_request_subject(request)
-        try:
-            req_gateway("post", "/api/logout", json={"user_name": user_name})
-        except ValidationError:
-            pass
-
         if request.user.username != FREE_ACCOUNT_USERNAME:
             revoked_session = revoke_device_session(request, request.user)
-            if request.auth and (
-                not revoked_session or not active_device_sessions(request.user).exists()
-            ):
+            has_other_devices = active_device_sessions(request.user).exists()
+            if not has_other_devices:
+                try:
+                    req_gateway("post", "/api/logout", json={"user_name": request.user.username})
+                except ValidationError:
+                    pass
+            if request.auth and (not revoked_session or not has_other_devices):
                 Token.objects.filter(key=str(request.auth)).delete()
+        else:
+            try:
+                req_gateway("post", "/api/logout", json={"user_name": get_request_subject(request)})
+            except ValidationError:
+                pass
 
         response = Response({"message": "退出成功"})
         response.delete_cookie("free_session", path="/", samesite="Strict")
+        response.delete_cookie("mirror_token", path="/", samesite="Lax")
         clear_auth_cookie(response)
         return response
 

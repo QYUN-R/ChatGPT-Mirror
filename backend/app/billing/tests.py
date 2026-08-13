@@ -43,11 +43,13 @@ from app.billing.services import (
     sync_commercial_pool_accounts,
 )
 from app.chatgpt.models import ChatgptAccount, ChatgptCar
-from app.chatgpt.views.chatgpt import ChatGPTLoginView
+from app.chatgpt.views.chatgpt import ChatGPTLoginView, ChatGPTSessionFailureView
 from app.chatgpt.views.gptcar import GptCarEnum, GptCarView
 from app.billing.admin_views import AdminPlanView, AdminPoolView
 from app.fields import decrypt_value
 import json
+
+MIRROR_TOKEN = "mirror-token-billing-regression-abcdefghijklmnopqrstuvwxyz"
 
 
 @override_settings(
@@ -477,12 +479,64 @@ class BillingServiceTests(TestCase):
         self.assertEqual(response.data["results"][0]["chatgpt_flag"], "套餐账号 01")
         self.assertEqual(response.data["results"][0]["default_login_mode"], "web")
 
+    def test_degraded_current_account_remains_visible_but_is_marked_unusable(self):
+        _, subscription = self.purchase()
+        assignment = ensure_assignment(subscription)
+        policy = PoolAccountPolicy.objects.get(account=assignment.account)
+        policy.enabled = False
+        policy.health_status = "DEGRADED"
+        policy.save(update_fields=["enabled", "health_status", "updated_at"])
+        request = APIRequestFactory().get("/0x/user/chatgpt-list")
+        force_authenticate(request, user=self.user)
+
+        with patch("app.accounts.views.req_gateway", return_value={}):
+            response = UserChatGPTAccountList.as_view()(request)
+
+        current = next(
+            (item for item in response.data["results"] if item["id"] == policy.id),
+            None,
+        )
+        self.assertIsNotNone(
+            current,
+            msg={
+                "response": response.data,
+                "assignment": assignment.account_id,
+                "policy": policy.id,
+                "policies": list(PoolAccountPolicy.objects.values_list("id", "account_id", "enabled", "health_status")),
+            },
+        )
+        self.assertFalse(current["auth_status"])
+        self.assertEqual(current["health_status"], "DEGRADED")
+
+    @override_settings(PUBLIC_SITE_URL="https://mirror.example")
+    @patch("app.cron.probe_web_session")
+    def test_explicitly_revoked_web_session_marks_account_unusable(self, probe_web_session):
+        from app.billing.services import refresh_pool_health
+
+        account = self.standard_accounts[0]
+        account.session_token = "session-token"
+        account.session_token_valid = True
+        account.save(update_fields=["session_token", "session_token_valid"])
+        probe_web_session.return_value = (False, "token_revoked")
+
+        with patch.object(ChatgptAccount, "refresh_auth_diagnostics"):
+            refresh_pool_health()
+
+        account.refresh_from_db()
+        policy = PoolAccountPolicy.objects.get(account=account)
+        self.assertFalse(account.auth_status)
+        self.assertFalse(account.access_token_valid)
+        self.assertFalse(account.session_token_valid)
+        self.assertEqual(account.last_error, "token_revoked")
+        self.assertEqual(policy.health_status, "DEGRADED")
+
     def test_managed_user_can_select_another_account_in_same_plan_pool(self):
         _, subscription = self.purchase()
         assignment = ensure_assignment(subscription)
         target_policy = PoolAccountPolicy.objects.filter(
             pool=self.standard_pool,
         ).exclude(account=assignment.account).get()
+
         request = APIRequestFactory().post(
             "/0x/chatgpt/login",
             {"chatgpt_id": target_policy.id, "login_mode": "api"},
@@ -497,6 +551,70 @@ class BillingServiceTests(TestCase):
         assignment.refresh_from_db()
         self.assertEqual(assignment.account_id, target_policy.account_id)
         self.assertEqual(gateway.call_args_list[1].kwargs["json"]["access_token"], target_policy.account.access_token)
+
+    @override_settings(PUBLIC_SITE_URL="")
+    @patch("app.chatgpt.views.chatgpt.gateway_session_identity")
+    def test_session_failure_marks_current_managed_account_degraded(self, session_identity):
+        _, subscription = self.purchase()
+        assignment = ensure_assignment(subscription)
+        session_identity.return_value = {
+            "user_name": self.user.username,
+            "chatgpt_username": assignment.account.chatgpt_username,
+            "login_mode": "web",
+        }
+        assignment.account.last_error = "token_revoked"
+        assignment.account.save(update_fields=["last_error"])
+        policy = PoolAccountPolicy.objects.get(account=assignment.account)
+        request = APIRequestFactory().post(
+            "/0x/chatgpt/session-failure",
+            {"chatgpt_id": policy.id, "error_code": "token_revoked"},
+            format="json",
+            HTTP_COOKIE=f"mirror_token={MIRROR_TOKEN}",
+        )
+
+        response = ChatGPTSessionFailureView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data["message"],
+            "失效账号已移出可用列表",
+            msg={
+                "subscription_status": subscription.status,
+                "subscription_active": subscription.is_service_active,
+                "assignment_exists": AccountAssignment.objects.filter(subscription=subscription, active=True).exists(),
+            },
+        )
+        account = ChatgptAccount.objects.get(pk=assignment.account_id)
+        policy.refresh_from_db()
+        self.assertFalse(account.auth_status)
+        self.assertEqual(account.last_error, "token_revoked")
+        self.assertEqual(policy.health_status, "DEGRADED")
+
+    @override_settings(PUBLIC_SITE_URL="")
+    @patch("app.chatgpt.views.chatgpt.gateway_session_identity")
+    def test_session_failure_ignores_mirror_session_for_another_upstream(self, session_identity):
+        _, subscription = self.purchase()
+        assignment = ensure_assignment(subscription)
+        assignment.account.last_error = "token_revoked"
+        assignment.account.save(update_fields=["last_error"])
+        session_identity.return_value = {
+            "user_name": self.user.username,
+            "chatgpt_username": "different-upstream@example.com",
+            "login_mode": "web",
+        }
+        request = APIRequestFactory().post(
+            "/0x/chatgpt/session-failure",
+            {"chatgpt_id": assignment.account_id, "error_code": "token_revoked"},
+            format="json",
+            HTTP_COOKIE=f"mirror_token={MIRROR_TOKEN}",
+        )
+
+        response = ChatGPTSessionFailureView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["message"], "已返回账号选择页")
+        assignment.account.refresh_from_db()
+        self.assertTrue(assignment.account.auth_status)
 
     def test_managed_user_cannot_select_account_from_another_tier(self):
         self.purchase()
@@ -1048,7 +1166,11 @@ class BillingApiTests(TestCase):
             ).values_list("id", flat=True)
         )
         self.assertEqual(active_ids, {sessions[0].id, sessions[4].id})
-        self.assertEqual(gateway_logout.call_count, 3)
+        gateway_logout.assert_called_once_with(
+            "post",
+            "/api/logout",
+            json={"user_name": self.user.username},
+        )
         self.plan.refresh_from_db()
         self.assertEqual(self.plan.tagline, "设备策略调整时保留的宣传语")
 

@@ -2,7 +2,7 @@
 from django.urls import path
 
 from app.chatgpt.views.chatgpt import ChatGPTAccountView, ChatGPTLoginView, ChatGPTAccountEnum, ChatGPTTokenExpiryView, \
-    ChatGPTRefreshTokenView
+    ChatGPTRefreshTokenView, ChatGPTSessionFailureView
 from app.chatgpt.views.gptcar import GptCarView, GptCarEnum
 
 urlpatterns = [
@@ -11,6 +11,7 @@ urlpatterns = [
     path("token-expiry", ChatGPTTokenExpiryView.as_view()),
     path("refresh-token", ChatGPTRefreshTokenView.as_view()),
     path("login", ChatGPTLoginView.as_view()),
+    path("session-failure", ChatGPTSessionFailureView.as_view()),
     path("car", GptCarView.as_view()),
     path("car-enum", GptCarEnum.as_view()),
 

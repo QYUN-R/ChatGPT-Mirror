@@ -18,6 +18,11 @@
     >
       <t-loading :loading="tableLoading">
         <t-space direction="vertical" style="width: 100%; margin-bottom: 16px" :size="12">
+          <t-alert
+            v-if="route.query.upstream === 'expired'"
+            theme="error"
+            message="刚才使用的上游账号已失效，系统已将其移出可用账号列表，请重新选择。"
+          />
           <div class="mode-switch">
             <span class="mode-switch__label">登录模式</span>
             <t-radio-group v-model="selectedMode" variant="default-filled">
@@ -47,7 +52,7 @@
             v-for="item in tableData"
             :key="item.id"
             class="account-card"
-            :class="{ 'is-disabled': !item.auth_status || !supportsMode(item, selectedMode) }"
+            :class="{ 'is-disabled': !isAccountUsable(item, selectedMode) }"
             @click="onSelect(item.id)"
           >
             <div style="background: #f2f4f7; padding: 8px; border-radius: 5px">
@@ -80,7 +85,7 @@
                 <div style="font-size: 12px; display: flex; justify-content: space-between">
                   <div>实时状态</div>
                   <div>
-                    <span v-if="item.auth_status === false">已过期</span>
+                    <span v-if="!isAccountHealthy(item)">账号失效</span>
                     <span v-else-if="getGPTUsePercent(item) < 40">空闲</span>
                     <span v-else-if="getGPTUsePercent(item) < 80">忙碌</span>
                     <span v-else>繁忙 | 可用</span>
@@ -136,6 +141,8 @@ interface TableData {
   supported_login_modes: string[]
   default_login_mode: 'api' | 'web'
   is_current?: boolean
+  health_status?: string
+  last_error?: string
 }
 const tableData = ref<TableData[]>([])
 const managedAssignment = ref(false)
@@ -163,7 +170,7 @@ const getUserChatGPTAccountList = async () => {
   tableLoading.value = false
   
   if (!data) {
-    router.push({ name: 'Login' })
+    statusText.value = '账号列表加载失败，请重新登录或稍后重试'
     return
   }
   
@@ -208,8 +215,20 @@ const supportsMode = (item: TableData, mode: 'api' | 'web') => {
   return Array.isArray(item.supported_login_modes) && item.supported_login_modes.includes(mode)
 }
 
+const isAccountHealthy = (item: TableData) => {
+  return item.auth_status !== false && item.health_status !== 'DEGRADED'
+}
+
+const isAccountUsable = (item: TableData, mode: 'api' | 'web') => {
+  return isAccountHealthy(item) && supportsMode(item, mode)
+}
+
 const onSelect = async (chatgptId: number | null) => {
   const current = tableData.value.find(item => item.id === chatgptId)
+  if (current && !isAccountHealthy(current)) {
+    MessagePlugin.error('该上游账号已经失效，请选择其他账号')
+    return
+  }
   if (current && !supportsMode(current, selectedMode.value)) {
     MessagePlugin.warning(
       selectedMode.value === 'api'
@@ -231,6 +250,7 @@ const onSelect = async (chatgptId: number | null) => {
   tableLoading.value = false
   
   if (data) {
+    sessionStorage.setItem('tuwugpt.activePoolAccountId', String(chatgptId ?? ''))
     MessagePlugin.success('登录成功')
     if (data.login_url) {
       window.location.replace(data.login_url)
