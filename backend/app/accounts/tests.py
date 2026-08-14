@@ -536,6 +536,7 @@ class SecurityRegressionTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("allow_register", response.data)
         self.assertIn("billing_enabled", response.data)
+        self.assertGreaterEqual(response.data["email_verification_resend_seconds"], 1)
 
     @override_settings(CSRF_TRUSTED_ORIGINS=["https://mirror.example"])
     @patch("app.accounts.views.login.LOCAL_CAPTCHA_ENABLED", False)

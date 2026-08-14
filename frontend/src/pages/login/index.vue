@@ -93,10 +93,16 @@
                   :disabled="loading || verificationSending || cooldown > 0 || (!deviceVerificationRequired && !humanVerificationReady)"
                   @click="requestVerificationCode"
                 >
-                  {{ cooldown > 0 ? `${cooldown}s 后重发` : '发送验证码' }}
+                  {{ verificationButtonLabel }}
                 </t-button>
               </div>
               <p v-if="verificationDeliveryMessage" class="verification-status">{{ verificationDeliveryMessage }}</p>
+              <p v-if="verificationRequested" class="verification-resend-status">
+                {{ cooldown > 0 ? `未收到？${cooldown} 秒后可重新发送` : '未收到验证码？可以重新发送' }}
+              </p>
+              <p v-if="verificationRequested && isGoogleMailbox" class="verification-mailbox-hint">
+                Gmail 用户请同时检查“垃圾邮件”和“所有邮件”。
+              </p>
             </t-form-item>
           </div>
 
@@ -213,6 +219,7 @@ declare global {
 }
 
 const BINDING_TICKET_STORAGE_KEY = 'chat2.email-binding-ticket'
+const VERIFICATION_COOLDOWN_STORAGE_PREFIX = 'tuwugpt.email-verification.cooldown'
 const PUBLIC_AUTH_PATHS = new Set(['/login', '/register', '/forgot-password', '/bind-email'])
 const userStore = useUserStore()
 const route = useRoute()
@@ -220,12 +227,14 @@ const router = useRouter()
 const loading = ref(false)
 const verificationSending = ref(false)
 const cooldown = ref(0)
+const verificationRequested = ref(false)
 const verificationDeliveryMessage = ref('')
 const cfg = ref({
   show_github: true,
   allow_register: false,
   billing_enabled: false,
   email_verification_enabled: false,
+  email_verification_resend_seconds: 60,
   notice: '',
   turnstile_enabled: false,
   turnstile_site_key: '',
@@ -280,6 +289,14 @@ const turnstileAction = computed(() => {
   if (isForgotPassword.value) return 'password_reset'
   if (isBinding.value) return 'bind_email'
   return 'login'
+})
+const isGoogleMailbox = computed(() => {
+  const domain = form.email.trim().toLowerCase().split('@').pop() || ''
+  return domain === 'gmail.com' || domain === 'googlemail.com'
+})
+const verificationButtonLabel = computed(() => {
+  if (cooldown.value > 0) return `${cooldown.value}s 后重发`
+  return verificationRequested.value ? '重新发送验证码' : '发送验证码'
 })
 const needsTurnstileForSubmit = computed(() => isLogin.value && !deviceVerificationRequired.value)
 const humanVerificationReady = computed(() => {
@@ -432,16 +449,58 @@ const renderTurnstile = async () => {
   }
 }
 
-const startCooldown = () => {
+const stopCooldownTimer = () => {
   if (cooldownTimer) window.clearInterval(cooldownTimer)
-  cooldown.value = 60
+  cooldownTimer = null
+}
+
+const verificationCooldownKey = () => {
+  const identity = deviceVerificationRequired.value
+    ? `device:${deviceTicket.value.slice(-24)}`
+    : `${turnstileAction.value}:${form.email.trim().toLowerCase()}`
+  return `${VERIFICATION_COOLDOWN_STORAGE_PREFIX}:${identity}`
+}
+
+const runCooldown = (deadline: number) => {
+  stopCooldownTimer()
+  const update = () => {
+    cooldown.value = Math.max(0, Math.ceil((deadline - Date.now()) / 1000))
+    if (cooldown.value <= 0) stopCooldownTimer()
+  }
+  update()
+  if (cooldown.value <= 0) return
   cooldownTimer = window.setInterval(() => {
-    cooldown.value -= 1
-    if (cooldown.value <= 0 && cooldownTimer) {
-      window.clearInterval(cooldownTimer)
-      cooldownTimer = null
-    }
+    update()
   }, 1000)
+}
+
+const startCooldown = (seconds = Number(cfg.value.email_verification_resend_seconds || 60)) => {
+  const safeSeconds = Math.max(1, Math.min(Number(seconds || 60), 3600))
+  const deadline = Date.now() + safeSeconds * 1000
+  verificationRequested.value = true
+  sessionStorage.setItem(verificationCooldownKey(), String(deadline))
+  runCooldown(deadline)
+}
+
+const restoreCooldown = () => {
+  stopCooldownTimer()
+  cooldown.value = 0
+  verificationRequested.value = false
+  const key = verificationCooldownKey()
+  const deadline = Number(sessionStorage.getItem(key) || 0)
+  if (!Number.isFinite(deadline) || deadline <= Date.now()) {
+    sessionStorage.removeItem(key)
+    return
+  }
+  verificationRequested.value = true
+  runCooldown(deadline)
+}
+
+const clearCooldown = () => {
+  sessionStorage.removeItem(verificationCooldownKey())
+  stopCooldownTimer()
+  cooldown.value = 0
+  verificationRequested.value = false
 }
 
 const emailLooksPresent = () => form.email.trim().includes('@')
@@ -453,11 +512,13 @@ const watchVerificationDelivery = (challengeId: string) => {
     const data = await request(`/0x/user/email-verifications/${challengeId}/status`)
     if (pollVersion !== verificationDeliveryPollVersion || !data) return
     if (data.delivery_status === 'SENT') {
-      verificationDeliveryMessage.value = '验证码已发送，请查收邮箱'
+      verificationDeliveryMessage.value = isGoogleMailbox.value
+        ? '验证码已发送，请查收 Gmail；若收件箱没有，请检查垃圾邮件或所有邮件'
+        : '验证码已发送，请查收邮箱'
       return
     }
     if (data.delivery_status === 'FAILED') {
-      verificationDeliveryMessage.value = '验证码发送失败，请稍后重试'
+      verificationDeliveryMessage.value = '验证码发送失败，倒计时结束后可重新发送'
       return
     }
     verificationDeliveryMessage.value = '验证码正在发送，请稍候'
@@ -606,14 +667,12 @@ const onSubmit = async ({ validateResult }: any) => {
 }
 
 const resetDeviceVerification = () => {
+  clearCooldown()
   deviceVerificationRequired.value = false
   deviceTicket.value = ''
   deviceMaskedEmail.value = ''
   form.verification_code = ''
   verificationDeliveryMessage.value = ''
-  if (cooldownTimer) window.clearInterval(cooldownTimer)
-  cooldownTimer = null
-  cooldown.value = 0
 }
 
 const goFree = async () => {
@@ -659,6 +718,7 @@ onMounted(async () => {
     return
   }
   await getVersionCfg()
+  restoreCooldown()
   if (localCaptchaEnabled.value) await loadLocalCaptcha()
   else await renderTurnstile()
 })
@@ -673,9 +733,19 @@ watch(turnstileAction, async () => {
   await renderTurnstile()
 })
 
+watch(
+  () => [turnstileAction.value, form.email.trim().toLowerCase(), deviceTicket.value],
+  () => {
+    verificationDeliveryPollVersion += 1
+    if (verificationDeliveryTimer) window.clearTimeout(verificationDeliveryTimer)
+    verificationDeliveryMessage.value = ''
+    restoreCooldown()
+  },
+)
+
 onBeforeUnmount(() => {
   removeTurnstile()
-  if (cooldownTimer) window.clearInterval(cooldownTimer)
+  stopCooldownTimer()
   verificationDeliveryPollVersion += 1
   if (verificationDeliveryTimer) window.clearTimeout(verificationDeliveryTimer)
 })
@@ -707,6 +777,8 @@ onBeforeUnmount(() => {
 .login-loading { display: block; width: 100%; }
 .form-field { margin-bottom: 20px; }
 .verification-status { margin: 8px 0 0; color: var(--login-muted); font-size: 12px; line-height: 1.5; }
+.verification-resend-status { margin: 7px 0 0; color: var(--login-text); font-size: 12px; line-height: 1.5; }
+.verification-mailbox-hint { margin: 5px 0 0; color: #8a6418; font-size: 12px; line-height: 1.5; }
 .form-field label { display: inline-block; margin-bottom: 8px; color: #373735; font-size: 14px; font-weight: 500; line-height: 20px; }
 .form-field :deep(.t-form__item), .form-field :deep(.t-form__controls-content), .submit-item :deep(.t-form__controls-content) { display: block; margin-bottom: 0; }
 .form-field :deep(.t-input), .form-field :deep(.t-textarea) { color: var(--login-text); background: var(--login-surface); border-color: var(--login-border); border-radius: 8px; box-shadow: none; }
