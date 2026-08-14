@@ -9,7 +9,7 @@
           </t-tag>
         </div>
         <div class="capacity-values">
-          <div><span>号池席位</span><strong>{{ plan.capacity.used }} / {{ plan.capacity.total }}</strong></div>
+          <div><span>号池容量</span><strong>{{ plan.capacity.used }} / {{ plan.capacity.total }}</strong></div>
           <div><span>套餐人数</span><strong>{{ plan.capacity.plan_used }} / {{ plan.user_limit || '不限' }}</strong></div>
           <div><span>可新增</span><strong>{{ plan.capacity.available }}</strong></div>
         </div>
@@ -82,7 +82,7 @@
                       </t-tag>
                     </div>
                     <dl>
-                      <div><dt>当前绑定</dt><dd>{{ policy.active_bindings }} / {{ policy.binding_limit }} 人</dd></div>
+                      <div><dt>当前人数</dt><dd>{{ policy.active_bindings }} / {{ policy.binding_limit }} 人</dd></div>
                       <div><dt>允许分配</dt><dd>{{ policy.enabled ? '是' : '否' }}</dd></div>
                       <div><dt>最近检查</dt><dd>{{ formatDateTime(policy.last_health_check_at) }}</dd></div>
                     </dl>
@@ -93,7 +93,7 @@
                         <t-button size="small" theme="danger" variant="text">停用</t-button>
                       </t-popconfirm>
                       <t-popconfirm
-                        :content="policy.active_bindings ? '该账号仍有用户使用，系统会阻止删除' : '删除后会清除 Token、Cookie 和代理绑定，确定继续吗？'"
+                        :content="deleteAccountConfirmText(policy)"
                         @confirm="deleteAccount(policy)"
                       >
                         <t-button size="small" theme="danger" variant="text">删除账号</t-button>
@@ -176,7 +176,7 @@
       <t-form :data="policyForm" label-width="100px">
         <t-form-item label="上游账号"><t-input :value="policyForm.account_name" disabled /></t-form-item>
         <t-form-item label="所属号池"><t-input :value="policyForm.pool_name" disabled /></t-form-item>
-        <t-form-item label="绑定上限"><t-input-number v-model="policyForm.binding_limit" :min="Math.max(1, policyForm.active_bindings || 0)" /></t-form-item>
+        <t-form-item label="承载上限"><t-input-number v-model="policyForm.binding_limit" :min="Math.max(1, policyForm.active_bindings || 0)" /></t-form-item>
         <t-form-item label="健康状态">
           <t-select v-model="policyForm.health_status">
             <t-option value="HEALTHY" label="健康" />
@@ -200,7 +200,7 @@
           <div class="usage-summary">
             <div><span>所属号池</span><strong>{{ usagePolicy.pool_name }}</strong></div>
             <div><span>当前使用</span><strong>{{ usagePolicy.active_bindings }} 人</strong></div>
-            <div><span>绑定上限</span><strong>{{ usagePolicy.binding_limit }} 人</strong></div>
+            <div><span>承载上限</span><strong>{{ usagePolicy.binding_limit }} 人</strong></div>
           </div>
 
           <div class="desktop-usage-table">
@@ -313,6 +313,15 @@ const healthLabel = (value: string) => ({ HEALTHY: '健康', DEGRADED: '异常',
 const subscriptionStatusLabel = (value: string) => ({ ACTIVE: '生效中', SUSPENDED: '已暂停', EXPIRED: '已到期', PENDING: '待生效' }[value] || value)
 const poolStatusLabel = (row: any) => row.account_count === 0 ? '待添加账号' : row.healthy_account_count === 0 ? '暂无健康账号' : row.active_bindings >= row.total_capacity ? '容量已满' : '容量正常'
 const poolStatusTheme = (row: any) => row.account_count === 0 ? 'warning' : row.healthy_account_count === 0 || row.active_bindings >= row.total_capacity ? 'danger' : 'success'
+const deleteAccountConfirmText = (row: any) => {
+  if (row.deletion_requires_migration) {
+    return `该健康账号当前有 ${row.active_bindings} 人使用，确认后先迁移全部用户；容量不足时不会删除。`
+  }
+  if (row.active_bindings) {
+    return `该账号已失效或停用，将直接释放 ${row.active_bindings} 个使用记录并删除。`
+  }
+  return '删除后会清除 Token、Cookie 和代理绑定，确定继续吗？'
+}
 
 const loadData = async () => {
   loading.value = true
@@ -403,9 +412,14 @@ const disablePolicy = async (row: any) => {
 }
 
 const deleteAccount = async (row: any) => {
-  const data = await request('/0x/chatgpt', 'DELETE', { chatgpt_username: row.account_name })
+  const data = await request('/0x/chatgpt', 'DELETE', {
+    chatgpt_username: row.account_name,
+    migrate_users: Boolean(row.deletion_requires_migration)
+  })
   if (data) {
-    MessagePlugin.success('上游账号已删除，凭据已清除')
+    const migrated = Number(data.migrated_users || 0)
+    const released = Number(data.released_users || 0)
+    MessagePlugin.success(migrated ? `已迁移 ${migrated} 人并删除账号` : released ? `已释放 ${released} 个使用记录并删除账号` : '上游账号已删除，凭据已清除')
     await loadData()
   }
 }

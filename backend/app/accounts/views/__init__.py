@@ -31,6 +31,7 @@ from app.accounts.email_auth import has_verified_email, issue_binding_ticket
 from app.accounts.model_limits import normalize_model_limits
 from app.accounts.views.login import issue_user_token
 from app.billing.exceptions import BillingError
+from app.billing.models import AccountAssignment
 from app.billing.services import audit, has_managed_subscription, managed_account_catalog, resolve_managed_account
 from app.accounts.device_policy import (
     effective_device_policy,
@@ -164,7 +165,15 @@ class UserChatGPTAccountList(APIView):
         # cannot be entered and switch to another healthy account in the pool.
         visible_accounts = user_gpt_list
         policy_by_account_id = {policy.account_id: policy for policy in managed_policies}
-        for index, line in enumerate(visible_accounts, start=1):
+        active_binding_counts = {
+            row["account_id"]: row["total"]
+            for row in AccountAssignment.objects.filter(
+                account_id__in=[line.id for line in visible_accounts],
+                active=True,
+            ).values("account_id").annotate(total=Count("id"))
+        } if managed else {}
+        account_rows = []
+        for line in visible_accounts:
             gpt_use_count_dict = use_count_dict.get(line.chatgpt_username, {}).get("gpt-4o", {})
             last_3h_use_count = (gpt_use_count_dict.get("last_1h", 0) +
                           gpt_use_count_dict.get("last_2h", 0) + gpt_use_count_dict.get("last_3h", 0) +
@@ -174,10 +183,18 @@ class UserChatGPTAccountList(APIView):
                 supported_login_modes.append("api")
             if line.session_token_valid:
                 supported_login_modes.append("web")
-            results.append({
+            policy = policy_by_account_id.get(line.id)
+            active_bindings = active_binding_counts.get(line.id, 0) if policy else 0
+            binding_limit = int(policy.binding_limit or 0) if policy else None
+            is_current = bool(managed_assignment and managed_assignment.account_id == line.id)
+            is_full = bool(policy and active_bindings >= binding_limit)
+            health_status = policy.health_status if policy else (
+                "HEALTHY" if line.auth_status and supported_login_modes else "DEGRADED"
+            )
+            account_rows.append({
                 "id": policy_by_account_id[line.id].id if managed else line.id,
                 "use_count": last_3h_use_count,
-                "chatgpt_flag": f"套餐账号 {index:02d}" if managed else "{:03}{}".format(line.id, line.chatgpt_username[:3]),
+                "chatgpt_flag": "" if managed else "{:03}{}".format(line.id, line.chatgpt_username[:3]),
                 "plan_type": line.plan_type,
                 "auth_status": line.auth_status,
                 "access_token_valid": line.access_token_valid,
@@ -185,12 +202,29 @@ class UserChatGPTAccountList(APIView):
                 "supported_login_modes": supported_login_modes,
                 "default_login_mode": "web",
                 "managed_assignment": managed,
-                "is_current": bool(managed_assignment and managed_assignment.account_id == line.id),
-                "health_status": policy_by_account_id[line.id].health_status if managed else (
-                    "HEALTHY" if line.auth_status and supported_login_modes else "DEGRADED"
-                ),
+                "is_current": is_current,
+                "health_status": health_status,
                 "last_error": str(line.last_error or ""),
+                "pool_id": policy.pool_id if policy else None,
+                "pool_name": policy.pool.car_name if policy else "",
+                "active_bindings": active_bindings,
+                "binding_limit": binding_limit,
+                "remaining_capacity": max(binding_limit - active_bindings, 0) if binding_limit is not None else None,
+                "is_full": is_full,
+                "occupancy_ratio": (active_bindings / binding_limit) if binding_limit else 0,
             })
+
+        if managed:
+            account_rows.sort(key=lambda item: (
+                0 if item["auth_status"] and item["health_status"] == "HEALTHY" else 2,
+                0 if item["is_current"] or not item["is_full"] else 1,
+                item["occupancy_ratio"],
+                item["active_bindings"],
+                item["id"],
+            ))
+            for index, item in enumerate(account_rows, start=1):
+                item["chatgpt_flag"] = f"套餐账号 {index:02d}"
+        results.extend(account_rows)
 
         return Response({"results": results, "managed_assignment": managed})
 

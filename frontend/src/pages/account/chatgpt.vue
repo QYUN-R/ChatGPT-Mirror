@@ -86,6 +86,13 @@
         <template #last_error="{ row }">
           <span>{{ row.last_error || '-' }}</span>
         </template>
+        <template #pool_capacity="{ row }">
+          <div v-if="row.pool_name" class="pool-capacity-cell">
+            <span>{{ row.pool_name }}</span>
+            <strong>{{ row.active_bindings || 0 }} / {{ row.binding_limit || '-' }} 人</strong>
+          </div>
+          <span v-else>-</span>
+        </template>
         <template #op="{ row }">
           <t-space>
             <t-link theme="primary" :loading="checkingId === row.id" @click="handleCheckTokenExpiry(row)">
@@ -100,9 +107,7 @@
               刷新Token
             </t-link>
             <t-link theme="primary" @click="showEditDialog(row)">编辑</t-link>
-            <t-popconfirm content="确定删除该账号吗？" @confirm="handleDelete(row)">
-              <t-link theme="danger">删除</t-link>
-            </t-popconfirm>
+            <t-link theme="danger" @click="showDeleteDialog(row)">删除</t-link>
           </t-space>
         </template>
       </t-table>
@@ -164,6 +169,25 @@
       </t-form>
     </t-dialog>
 
+    <t-dialog
+      :visible="deleteDialogVisible"
+      :header="deleteTarget?.deletion_requires_migration ? '迁移用户后删除账号' : '删除上游账号'"
+      :confirm-btn="{ theme: 'danger', content: deleteConfirmLabel, loading: submitLoading }"
+      @confirm="handleDelete"
+      @close="closeDeleteDialog"
+    >
+      <div v-if="deleteTarget" class="delete-account-copy">
+        <strong>{{ deleteTarget.chatgpt_username }}</strong>
+        <p v-if="deleteTarget.deletion_requires_migration">
+          该健康账号当前有 {{ deleteTarget.active_bindings }} 人使用。系统会先将这些用户迁移到其套餐可用的其他空闲账号；只要有一人无法迁移，本次删除就会全部取消。
+        </p>
+        <p v-else-if="deleteTarget.active_bindings">
+          该账号已失效或停用，当前 {{ deleteTarget.active_bindings }} 个使用记录会直接释放，用户下次进入时可重新选择空闲账号。
+        </p>
+        <p v-else>删除后会清除 Token、Cookie 和代理绑定，历史审计仍会保留。</p>
+      </div>
+    </t-dialog>
+
     <!-- 编辑对话框 -->
     <t-dialog
       :visible="editDialogVisible"
@@ -195,7 +219,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch } from 'vue'
+import { computed, ref, reactive, onMounted, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import request from '@/api/request'
 
@@ -207,6 +231,8 @@ const loading = ref(false)
 const submitLoading = ref(false)
 const addDialogVisible = ref(false)
 const editDialogVisible = ref(false)
+const deleteDialogVisible = ref(false)
+const deleteTarget = ref<any>(null)
 const addFormRef = ref()
 const editFormRef = ref()
 const tableData = ref<any[]>([])
@@ -237,6 +263,7 @@ const columns = [
   { colKey: 'session_token_valid', title: 'SessionToken', cell: 'session_token_valid', width: 120 },
   { colKey: 'supported_login_modes', title: '支持模式', cell: 'supported_login_modes', width: 160 },
   { colKey: 'use_count', title: '使用次数', cell: 'use_count', width: 200 },
+  { colKey: 'pool_capacity', title: '号池人数', cell: 'pool_capacity', width: 170 },
   { colKey: 'proxy_node_id', title: '代理节点', cell: 'proxy_node_id', width: 110 },
   { colKey: 'token_remaining', title: 'Token剩余', cell: 'token_remaining', width: 130 },
   { colKey: 'last_check_at', title: '最近诊断', cell: 'last_check_at', width: 160 },
@@ -244,6 +271,10 @@ const columns = [
   { colKey: 'remark', title: '备注', ellipsis: true },
   { colKey: 'op', title: '操作', cell: 'op', width: 260 }
 ]
+
+const deleteConfirmLabel = computed(() =>
+  deleteTarget.value?.deletion_requires_migration ? '迁移用户后删除' : '确认删除',
+)
 
 const addFormData = reactive({
   auth_type: 'cookie' as AuthInputType,
@@ -546,12 +577,30 @@ const handleRefreshToken = async (row: any) => {
   }
 }
 
-const handleDelete = async (row: any) => {
+const showDeleteDialog = (row: any) => {
+  deleteTarget.value = row
+  deleteDialogVisible.value = true
+}
+
+const closeDeleteDialog = () => {
+  deleteDialogVisible.value = false
+  deleteTarget.value = null
+}
+
+const handleDelete = async () => {
+  const row = deleteTarget.value
+  if (!row) return
+  submitLoading.value = true
   const data = await request('/0x/chatgpt', 'DELETE', {
-    chatgpt_username: row.chatgpt_username
+    chatgpt_username: row.chatgpt_username,
+    migrate_users: Boolean(row.deletion_requires_migration)
   })
+  submitLoading.value = false
   if (data) {
-    MessagePlugin.success('删除成功')
+    const migrated = Number(data.migrated_users || 0)
+    const released = Number(data.released_users || 0)
+    MessagePlugin.success(migrated ? `已迁移 ${migrated} 人并删除账号` : released ? `已释放 ${released} 个使用记录并删除账号` : '删除成功')
+    closeDeleteDialog()
     fetchData()
   }
 }
@@ -563,5 +612,30 @@ const handleDelete = async (row: any) => {
   grid-template-columns: minmax(240px, 1fr) 180px auto;
   gap: 10px;
   margin-bottom: 16px;
+}
+
+.pool-capacity-cell {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.pool-capacity-cell span {
+  overflow: hidden;
+  color: var(--app-text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-capacity-cell strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.delete-account-copy p {
+  margin: 12px 0 0;
+  color: var(--app-text-muted);
+  line-height: 1.7;
 }
 </style>

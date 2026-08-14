@@ -808,9 +808,9 @@ def sync_commercial_pool_accounts(
     try:
         default_binding_limit = int(default_binding_limit)
     except (TypeError, ValueError) as exc:
-        raise BillingError("单账号绑定上限格式无效", code="invalid_binding_limit") from exc
+        raise BillingError("单账号承载上限格式无效", code="invalid_binding_limit") from exc
     if default_binding_limit < 1:
-        raise BillingError("单账号绑定上限必须至少为 1", code="invalid_binding_limit")
+        raise BillingError("单账号承载上限必须至少为 1", code="invalid_binding_limit")
 
     try:
         selected_ids = list(dict.fromkeys(int(item) for item in (account_ids or [])))
@@ -905,7 +905,7 @@ def sync_commercial_pool_accounts(
         next_limit = default_binding_limit if apply_binding_limit or not policy else policy.binding_limit
         if next_limit < active_bindings:
             raise BillingError(
-                f"账号 {account.chatgpt_username} 当前已有 {active_bindings} 人使用，绑定上限不能低于当前人数",
+                f"账号 {account.chatgpt_username} 当前已有 {active_bindings} 人使用，承载上限不能低于当前人数",
                 code="binding_limit_below_usage",
             )
 
@@ -956,13 +956,53 @@ def sync_commercial_pool_accounts(
 
 
 @transaction.atomic
-def archive_upstream_account(account, *, actor=None):
+def archive_upstream_account(account, *, actor=None, migrate_active_users=False):
     account = ChatgptAccount.objects.select_for_update().get(pk=account.pk)
-    active_bindings = AccountAssignment.objects.filter(account=account, active=True).count()
-    if active_bindings:
+    policy = (
+        PoolAccountPolicy.objects.select_for_update()
+        .select_related("pool", "account")
+        .filter(account=account)
+        .first()
+    )
+    assignments = list(
+        AccountAssignment.objects.select_for_update()
+        .select_related("subscription", "subscription__plan", "user")
+        .filter(account=account, active=True)
+        .order_by("subscription_id", "id")
+    )
+    account_is_usable = bool(policy and _policy_is_usable(policy))
+    if assignments and account_is_usable and not migrate_active_users:
         raise BillingError(
-            "该账号仍有用户正在使用，请先迁移用户后再删除",
+            "该健康账号仍有用户正在使用，请选择迁移用户后删除",
             code="account_in_use",
+        )
+
+    migrated_users = 0
+    released_users = 0
+    if assignments and account_is_usable:
+        policy.enabled = False
+        policy.health_status = "DISABLED"
+        policy.save(update_fields=["enabled", "health_status", "updated_at"])
+        for assignment in assignments:
+            if not assignment.subscription.is_service_active:
+                _release_assignment(assignment.subscription, "account_deleted_inactive_subscription")
+                released_users += 1
+                continue
+            ensure_assignment(
+                assignment.subscription,
+                reason="upstream_account_deleted",
+                force=True,
+            )
+            migrated_users += 1
+    elif assignments:
+        for assignment in assignments:
+            _release_assignment(assignment.subscription, "unusable_upstream_account_deleted")
+            released_users += 1
+
+    if AccountAssignment.objects.filter(account=account, active=True).exists():
+        raise BillingError(
+            "账号当前使用记录处理未完成，删除已取消",
+            code="account_migration_incomplete",
         )
 
     policy_ids = list(PoolAccountPolicy.objects.filter(account=account).values_list("id", flat=True))
@@ -1001,9 +1041,20 @@ def archive_upstream_account(account, *, actor=None):
         "chatgpt_account.deleted",
         account,
         actor=actor,
-        detail={"removed_policy_ids": policy_ids, "credentials_cleared": True},
+        detail={
+            "removed_policy_ids": policy_ids,
+            "credentials_cleared": True,
+            "account_was_usable": account_is_usable,
+            "migrated_users": migrated_users,
+            "released_users": released_users,
+        },
     )
-    return account
+    return {
+        "account": account,
+        "account_was_usable": account_is_usable,
+        "migrated_users": migrated_users,
+        "released_users": released_users,
+    }
 
 
 def _web_probe_invalidates_credentials(error_code):
@@ -1018,7 +1069,14 @@ def _web_probe_invalidates_credentials(error_code):
 
 
 @transaction.atomic
-def ensure_assignment(subscription, *, reason="first_use", force=False, preferred_policy_id=None):
+def ensure_assignment(
+    subscription,
+    *,
+    reason="first_use",
+    force=False,
+    preferred_policy_id=None,
+    rebalance=False,
+):
     subscription = Subscription.objects.select_for_update().select_related(
         "user",
         "plan",
@@ -1031,7 +1089,7 @@ def ensure_assignment(subscription, *, reason="first_use", force=False, preferre
         subscription=subscription,
     ).first()
     linked_pool_ids = plan_pool_ids(subscription.plan)
-    if assignment and assignment.active and not force and preferred_policy_id is None:
+    if assignment and assignment.active and not force and preferred_policy_id is None and not rebalance:
         policy = PoolAccountPolicy.objects.select_related("account").filter(
             account=assignment.account,
             pool_id__in=linked_pool_ids,
@@ -1088,25 +1146,40 @@ def ensure_assignment(subscription, *, reason="first_use", force=False, preferre
         if binding_counts.get(selected.account_id, 0) >= selected.binding_limit:
             raise CapacityUnavailable("所选账号当前人数已满，请选择其他账号")
     else:
-        candidates = [
-            policy
-            for policy in policies
-            if binding_counts.get(policy.account_id, 0) < policy.binding_limit
-            and not (force and assignment and policy.account_id == assignment.account_id)
-        ]
+        candidates = []
+        for policy in policies:
+            is_current = bool(
+                assignment
+                and assignment.active
+                and policy.account_id == assignment.account_id
+                and policy.pool_id == assignment.pool_id
+            )
+            has_capacity = binding_counts.get(policy.account_id, 0) < policy.binding_limit
+            if force and is_current:
+                continue
+            if has_capacity or (is_current and not force):
+                candidates.append(policy)
         if not candidates:
             raise CapacityUnavailable("当前套餐号池没有可分配的健康上游账号")
         pool_priorities = {pool_id: index for index, pool_id in enumerate(linked_pool_ids)}
         selected = min(
             candidates,
             key=lambda policy: (
-                0 if reserved_pool_id and policy.pool_id == reserved_pool_id else 1,
                 binding_counts.get(policy.account_id, 0) / policy.binding_limit,
+                binding_counts.get(policy.account_id, 0),
                 recent_counts.get(policy.account_id, 0),
+                0 if reserved_pool_id and policy.pool_id == reserved_pool_id else 1,
                 pool_priorities.get(policy.pool_id, len(pool_priorities)),
                 policy.account_id,
             ),
         )
+    if (
+        assignment
+        and assignment.active
+        and assignment.account_id == selected.account_id
+        and assignment.pool_id == selected.pool_id
+    ):
+        return assignment
     old_account = assignment.account if assignment else None
     now = timezone.now()
     if assignment:
@@ -1246,18 +1319,25 @@ def managed_account_catalog(user):
     return assignment, policies, True
 
 
-def resolve_managed_account(user, *, preferred_policy_id=None):
+def resolve_managed_account(user, *, preferred_policy_id=None, rebalance=False):
     if not billing_enabled() or user.is_staff or user.is_superuser:
         return None
     subscription = refresh_subscription_state(user)
     if subscription:
         if not subscription.is_service_active:
             raise SubscriptionInactive("套餐已到期或暂停，请先续费")
-        reason = "user_selected" if preferred_policy_id is not None else "first_use"
+        reason = (
+            "user_selected"
+            if preferred_policy_id is not None
+            else "smart_rebalance"
+            if rebalance
+            else "first_use"
+        )
         return ensure_assignment(
             subscription,
             reason=reason,
             preferred_policy_id=preferred_policy_id,
+            rebalance=rebalance,
         ).account
     if billing_enforced():
         raise SubscriptionInactive("当前账号尚未开通套餐")

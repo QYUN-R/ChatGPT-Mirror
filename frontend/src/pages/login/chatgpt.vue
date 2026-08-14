@@ -80,7 +80,8 @@
           />
 
           <div class="pool-summary">
-            <span><strong>{{ usableAccountCount }}</strong> 个可用</span>
+            <span><strong>{{ availableAccountCount }}</strong> 个空闲</span>
+            <span><strong>{{ fullAccountCount }}</strong> 个已满</span>
             <span><strong>{{ unavailableAccountCount }}</strong> 个失效</span>
           </div>
 
@@ -92,6 +93,7 @@
               :class="{
                 'is-current': item.is_current,
                 'is-unavailable': !isAccountHealthy(item),
+                'is-full': isAccountHealthy(item) && item.is_full && !item.is_current,
                 'is-mode-unavailable': isAccountHealthy(item) && !supportsMode(item, selectedMode),
               }"
               type="button"
@@ -118,27 +120,47 @@
                   混合
                 </t-tag>
                 <t-tag v-if="item.is_current" size="small" theme="success" variant="light">
-                  当前
+                  当前使用
                 </t-tag>
               </span>
 
-              <span class="account-card__status">
-                <span>实时状态</span>
-                <strong :class="{ danger: !isAccountHealthy(item) }">{{ accountStatusLabel(item) }}</strong>
-              </span>
+              <template v-if="managedAssignment && item.binding_limit">
+                <span class="account-card__status">
+                  <span>当前人数</span>
+                  <strong :class="{ danger: item.is_full && !item.is_current }">
+                    {{ item.active_bindings }} / {{ item.binding_limit }} 人
+                  </strong>
+                </span>
+                <t-progress
+                  v-if="isAccountHealthy(item)"
+                  :percentage="getGPTUsePercent(item)"
+                  :status="usageStatus(item)"
+                  :label="false"
+                />
+                <span v-if="isAccountHealthy(item)" class="capacity-note">
+                  {{ item.is_full && !item.is_current ? '人数已满' : `剩余 ${item.remaining_capacity} 个名额` }}
+                </span>
+                <span v-else class="invalid-bar">账号失效，请选择其他账号</span>
+              </template>
 
-              <t-progress
-                v-if="isAccountHealthy(item)"
-                :percentage="getGPTUsePercent(item)"
-                :status="usageStatus(item)"
-                :label="false"
-              />
-              <span v-else class="invalid-bar">账号失效，请选择其他账号</span>
+              <template v-else>
+                <span class="account-card__status">
+                  <span>实时状态</span>
+                  <strong :class="{ danger: !isAccountHealthy(item) }">{{ accountStatusLabel(item) }}</strong>
+                </span>
+                <t-progress
+                  v-if="isAccountHealthy(item)"
+                  :percentage="getGPTUsePercent(item)"
+                  :status="usageStatus(item)"
+                  :label="false"
+                />
+                <span v-else class="invalid-bar">账号失效，请选择其他账号</span>
+              </template>
             </button>
           </div>
 
           <div class="dialog-footer-note">
-            <span>失效账号不会自动进入，其他可用账号可随时切换。</span>
+            <span>可随时选择空闲账号；账号是否上线及人数上限由管理员控制。</span>
             <t-button variant="outline" size="small" :loading="tableLoading" @click="getUserChatGPTAccountList">
               <template #icon><local-icon name="refresh" /></template>
               刷新账号状态
@@ -170,6 +192,13 @@ interface TableData {
   is_current?: boolean
   health_status?: string
   last_error?: string
+  pool_id?: number | null
+  pool_name?: string
+  active_bindings?: number
+  binding_limit?: number | null
+  remaining_capacity?: number | null
+  is_full?: boolean
+  occupancy_ratio?: number
 }
 
 const tableLoading = ref(false)
@@ -184,18 +213,17 @@ const selectedMode = ref<'api' | 'web'>('web')
 
 const isAdmin = computed(() => userStore.isAdmin)
 const usableAccountCount = computed(() => tableData.value.filter(isAccountHealthy).length)
+const availableAccountCount = computed(() => tableData.value.filter(item =>
+  isAccountHealthy(item) && !item.is_full,
+).length)
+const fullAccountCount = computed(() => tableData.value.filter(item =>
+  isAccountHealthy(item) && item.is_full,
+).length)
 const unavailableAccountCount = computed(() => tableData.value.length - usableAccountCount.value)
 const hasUsableAccountForMode = computed(() =>
   tableData.value.some(item => isAccountUsable(item, selectedMode.value)),
 )
-const currentAccountUsable = computed(() =>
-  tableData.value.some(item => item.is_current && isAccountUsable(item, selectedMode.value)),
-)
-const smartLoginLabel = computed(() =>
-  managedAssignment.value && currentAccountUsable.value
-    ? '继续使用当前账号'
-    : '智能分配可用账号',
-)
+const smartLoginLabel = computed(() => managedAssignment.value ? '智能推荐空闲账号' : '智能分配可用账号')
 
 onMounted(async () => {
   selectedMode.value = route.query.mode === 'api' ? 'api' : 'web'
@@ -203,6 +231,9 @@ onMounted(async () => {
 })
 
 const getGPTUsePercent = (item: TableData) => {
+  if (managedAssignment.value && item.binding_limit) {
+    return Math.min((Number(item.active_bindings || 0) / item.binding_limit) * 100, 100)
+  }
   const maxLimitCount = item.plan_type === 'free' ? 80 : 320
   return Math.min((Number(item.use_count || 0) / maxLimitCount) * 100 + 1, 99)
 }
@@ -251,7 +282,9 @@ const isAccountHealthy = (item: TableData) => {
 }
 
 const isAccountUsable = (item: TableData, mode: 'api' | 'web') => {
-  return isAccountHealthy(item) && supportsMode(item, mode)
+  return isAccountHealthy(item)
+    && supportsMode(item, mode)
+    && (!item.is_full || Boolean(item.is_current))
 }
 
 const planLabel = (planType: string) => {
@@ -270,6 +303,8 @@ const planLabel = (planType: string) => {
 const accountStatusLabel = (item: TableData) => {
   if (!isAccountHealthy(item)) return '账号失效'
   if (!supportsMode(item, selectedMode.value)) return '当前模式不可用'
+  if (item.is_full && !item.is_current) return '人数已满'
+  if (item.is_current) return '当前使用'
   const percentage = getGPTUsePercent(item)
   if (percentage < 40) return '空闲'
   if (percentage < 80) return '忙碌'
@@ -300,6 +335,10 @@ const onSelect = async (chatgptId: number | null) => {
         ? '该账号当前不支持 API 模式，请切换到混合模式'
         : '该账号当前不支持混合模式，请切换到 API 模式',
     )
+    return
+  }
+  if (current && current.is_full && !current.is_current) {
+    MessagePlugin.warning('该账号当前人数已满，请选择其他空闲账号')
     return
   }
   if (chatgptId === null && !hasUsableAccountForMode.value) {
@@ -463,6 +502,11 @@ const onSelect = async (chatgptId: number | null) => {
   border-color: #e1b6b0;
 }
 
+.account-card.is-full {
+  background: #f5f5f3;
+  border-color: #d9d9d4;
+}
+
 .account-card.is-mode-unavailable {
   background: #fbfaf4;
   border-color: #ded6b7;
@@ -521,6 +565,13 @@ const onSelect = async (chatgptId: number | null) => {
   line-height: 1.4;
   background: #f4deda;
   border-radius: 5px;
+}
+
+.capacity-note {
+  display: block;
+  margin-top: 7px;
+  color: var(--app-text-muted);
+  font-size: 11px;
 }
 
 .dialog-footer-note {

@@ -336,6 +336,10 @@ class PoolPolicySerializer(serializers.ModelSerializer):
     account_plan_type = serializers.CharField(source="account.plan_type", read_only=True)
     account_auth_status = serializers.BooleanField(source="account.auth_status", read_only=True)
     active_bindings = serializers.SerializerMethodField()
+    remaining_capacity = serializers.SerializerMethodField()
+    is_full = serializers.SerializerMethodField()
+    is_usable = serializers.SerializerMethodField()
+    deletion_requires_migration = serializers.SerializerMethodField()
 
     class Meta:
         model = PoolAccountPolicy
@@ -353,6 +357,10 @@ class PoolPolicySerializer(serializers.ModelSerializer):
             "health_status",
             "last_health_check_at",
             "active_bindings",
+            "remaining_capacity",
+            "is_full",
+            "is_usable",
+            "deletion_requires_migration",
         )
 
     def get_active_bindings(self, obj):
@@ -360,6 +368,25 @@ class PoolPolicySerializer(serializers.ModelSerializer):
         if annotated_count is not None:
             return annotated_count
         return obj.account.billing_assignments.filter(active=True).count()
+
+    def get_remaining_capacity(self, obj):
+        return max(int(obj.binding_limit or 0) - self.get_active_bindings(obj), 0)
+
+    def get_is_full(self, obj):
+        return self.get_active_bindings(obj) >= int(obj.binding_limit or 0)
+
+    @staticmethod
+    def get_is_usable(obj):
+        return bool(
+            obj.enabled
+            and obj.health_status == "HEALTHY"
+            and obj.account.auth_status
+            and not obj.account.is_archived
+            and (obj.account.access_token_valid or obj.account.session_token_valid)
+        )
+
+    def get_deletion_requires_migration(self, obj):
+        return bool(self.get_active_bindings(obj) and self.get_is_usable(obj))
 
 
 class AccountAssignmentUsageSerializer(serializers.ModelSerializer):

@@ -519,7 +519,7 @@ class PoolAccountPolicy(TimestampedModel):
     def clean(self):
         errors = {}
         if self.binding_limit < 1:
-            errors["binding_limit"] = "单账号绑定上限必须至少为 1"
+            errors["binding_limit"] = "单账号承载上限必须至少为 1"
         if self.account_id and not supports_commercial_pool_account(self.account):
             errors["account"] = "商业号池只允许加入 Plus、Pro、Team 或 Business 账号"
         if self.pool_id and self.tier:

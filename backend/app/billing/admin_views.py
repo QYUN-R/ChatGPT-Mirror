@@ -369,7 +369,7 @@ class AdminPoolView(APIView):
                 })
             if policy.binding_limit < active_bindings:
                 raise ValidationError({
-                    "message": f"该账号当前已有 {active_bindings} 人使用，绑定上限不能低于当前人数",
+                    "message": f"该账号当前已有 {active_bindings} 人使用，承载上限不能低于当前人数",
                     "code": "binding_limit_below_usage",
                 })
             try:
@@ -482,7 +482,7 @@ class AdminSubscriptionView(APIView):
             if action == "migrate":
                 assignment = ensure_assignment(subscription, reason="admin_requested", force=True)
                 return Response({
-                    "message": "账号绑定已检查",
+                    "message": "账号当前使用状态已检查",
                     "account_id": assignment.account_id,
                     "account_name": assignment.account.chatgpt_username,
                 })

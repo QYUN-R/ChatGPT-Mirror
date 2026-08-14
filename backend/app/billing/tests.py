@@ -671,6 +671,147 @@ class BillingServiceTests(TestCase):
         assignment.account.refresh_from_db()
         self.assertFalse(assignment.account.is_archived)
 
+    def test_unusable_upstream_account_with_users_can_be_deleted_without_migration(self):
+        _, subscription = self.purchase()
+        assignment = ensure_assignment(subscription)
+        source_account = assignment.account
+        source_policy = PoolAccountPolicy.objects.get(account=source_account)
+        source_policy.health_status = "DEGRADED"
+        source_policy.save(update_fields=["health_status", "updated_at"])
+        source_account.auth_status = False
+        source_account.access_token_valid = False
+        source_account.save(update_fields=["auth_status", "access_token_valid"])
+
+        result = archive_upstream_account(source_account)
+
+        assignment.refresh_from_db()
+        source_account.refresh_from_db()
+        self.assertFalse(assignment.active)
+        self.assertTrue(source_account.is_archived)
+        self.assertEqual(result["released_users"], 1)
+        self.assertEqual(result["migrated_users"], 0)
+        self.assertTrue(
+            AccountAssignmentEvent.objects.filter(
+                assignment=assignment,
+                event_type="RELEASED",
+                reason="unusable_upstream_account_deleted",
+            ).exists()
+        )
+
+    def test_healthy_upstream_account_can_migrate_all_users_before_delete(self):
+        first_user = User.objects.create_user(username="delete-migrate-first", password="Strong-password-123!")
+        second_user = User.objects.create_user(username="delete-migrate-second", password="Strong-password-123!")
+        _, first_subscription = self.purchase(user=first_user)
+        _, second_subscription = self.purchase(user=second_user)
+        source_policy = PoolAccountPolicy.objects.get(account=self.standard_accounts[0])
+        target_policy = PoolAccountPolicy.objects.get(account=self.standard_accounts[1])
+        first_assignment = ensure_assignment(first_subscription, preferred_policy_id=source_policy.id)
+        second_assignment = ensure_assignment(second_subscription, preferred_policy_id=source_policy.id)
+
+        result = archive_upstream_account(
+            source_policy.account,
+            migrate_active_users=True,
+        )
+
+        first_assignment.refresh_from_db()
+        second_assignment.refresh_from_db()
+        source_policy.account.refresh_from_db()
+        self.assertEqual(first_assignment.account_id, target_policy.account_id)
+        self.assertEqual(second_assignment.account_id, target_policy.account_id)
+        self.assertTrue(first_assignment.active)
+        self.assertTrue(second_assignment.active)
+        self.assertTrue(source_policy.account.is_archived)
+        self.assertEqual(result["migrated_users"], 2)
+        self.assertEqual(result["released_users"], 0)
+
+    def test_migration_delete_rolls_back_when_target_capacity_is_insufficient(self):
+        source_policy = PoolAccountPolicy.objects.get(account=self.standard_accounts[0])
+        target_policy = PoolAccountPolicy.objects.get(account=self.standard_accounts[1])
+        source_policy.binding_limit = 1
+        source_policy.save(update_fields=["binding_limit", "updated_at"])
+        target_policy.binding_limit = 1
+        target_policy.save(update_fields=["binding_limit", "updated_at"])
+        source_user = User.objects.create_user(username="delete-source", password="Strong-password-123!")
+        target_user = User.objects.create_user(username="delete-target", password="Strong-password-123!")
+        _, source_subscription = self.purchase(user=source_user)
+        _, target_subscription = self.purchase(user=target_user)
+        source_assignment = ensure_assignment(source_subscription, preferred_policy_id=source_policy.id)
+        target_assignment = ensure_assignment(target_subscription, preferred_policy_id=target_policy.id)
+
+        with self.assertRaises(CapacityUnavailable):
+            archive_upstream_account(source_policy.account, migrate_active_users=True)
+
+        source_assignment.refresh_from_db()
+        target_assignment.refresh_from_db()
+        source_policy.refresh_from_db()
+        source_policy.account.refresh_from_db()
+        self.assertEqual(source_assignment.account_id, source_policy.account_id)
+        self.assertEqual(target_assignment.account_id, target_policy.account_id)
+        self.assertTrue(source_assignment.active)
+        self.assertTrue(source_policy.enabled)
+        self.assertEqual(source_policy.health_status, "HEALTHY")
+        self.assertFalse(source_policy.account.is_archived)
+
+    def test_smart_rebalance_moves_user_to_least_loaded_account(self):
+        source_policy = PoolAccountPolicy.objects.get(account=self.standard_accounts[0])
+        target_policy = PoolAccountPolicy.objects.get(account=self.standard_accounts[1])
+        first_user = User.objects.create_user(username="rebalance-first", password="Strong-password-123!")
+        second_user = User.objects.create_user(username="rebalance-second", password="Strong-password-123!")
+        _, first_subscription = self.purchase(user=first_user)
+        _, second_subscription = self.purchase(user=second_user)
+        first_assignment = ensure_assignment(first_subscription, preferred_policy_id=source_policy.id)
+        ensure_assignment(second_subscription, preferred_policy_id=source_policy.id)
+
+        rebalanced = ensure_assignment(
+            first_subscription,
+            reason="smart_rebalance",
+            rebalance=True,
+        )
+
+        self.assertEqual(rebalanced.pk, first_assignment.pk)
+        self.assertEqual(rebalanced.account_id, target_policy.account_id)
+        self.assertEqual(AccountAssignment.objects.filter(account=source_policy.account, active=True).count(), 1)
+        self.assertEqual(AccountAssignment.objects.filter(account=target_policy.account, active=True).count(), 1)
+
+    def test_full_current_account_remains_available_only_to_current_user(self):
+        full_policy = PoolAccountPolicy.objects.get(account=self.standard_accounts[0])
+        full_policy.binding_limit = 1
+        full_policy.save(update_fields=["binding_limit", "updated_at"])
+        _, subscription = self.purchase()
+        assignment = ensure_assignment(subscription, preferred_policy_id=full_policy.id)
+
+        same_assignment = ensure_assignment(subscription, preferred_policy_id=full_policy.id)
+        self.assertEqual(same_assignment.pk, assignment.pk)
+
+        other_user = User.objects.create_user(username="full-account-other", password="Strong-password-123!")
+        _, other_subscription = self.purchase(user=other_user)
+        with self.assertRaises(CapacityUnavailable):
+            ensure_assignment(other_subscription, preferred_policy_id=full_policy.id)
+
+    def test_user_account_catalog_returns_capacity_and_full_state(self):
+        full_policy = PoolAccountPolicy.objects.get(account=self.standard_accounts[0])
+        full_policy.binding_limit = 1
+        full_policy.save(update_fields=["binding_limit", "updated_at"])
+        _, subscription = self.purchase()
+        assignment = ensure_assignment(subscription, preferred_policy_id=full_policy.id)
+        request = APIRequestFactory().get("/0x/user/chatgpt-list")
+        force_authenticate(request, user=self.user)
+
+        with (
+            patch.object(ChatgptAccount, "refresh_auth_diagnostics"),
+            patch("app.accounts.views.req_gateway", return_value={}),
+        ):
+            response = UserChatGPTAccountList.as_view()(request)
+
+        current = next(item for item in response.data["results"] if item["is_current"])
+        self.assertEqual(current["id"], full_policy.id)
+        self.assertEqual(current["pool_name"], self.standard_pool.car_name)
+        self.assertEqual(current["active_bindings"], 1)
+        self.assertEqual(current["binding_limit"], 1)
+        self.assertEqual(current["remaining_capacity"], 0)
+        self.assertTrue(current["is_full"])
+        self.assertEqual(assignment.account_id, full_policy.account_id)
+
     def test_unused_upstream_account_delete_clears_credentials_and_pool_membership(self):
         account = self.standard_accounts[1]
         self.standard_pool.gpt_account_list = [account.id]

@@ -43,6 +43,11 @@ class ShowChatgptTokenSerializer(serializers.ModelSerializer):
     supported_login_modes = serializers.SerializerMethodField()
     has_refresh_token = serializers.SerializerMethodField()
     last_error = serializers.SerializerMethodField()
+    pool_name = serializers.SerializerMethodField()
+    pool_health_status = serializers.SerializerMethodField()
+    active_bindings = serializers.SerializerMethodField()
+    binding_limit = serializers.SerializerMethodField()
+    deletion_requires_migration = serializers.SerializerMethodField()
 
     def __init__(self, *args, use_count_dict=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -75,6 +80,42 @@ class ShowChatgptTokenSerializer(serializers.ModelSerializer):
             secrets=(obj.access_token, obj.session_token, obj.refresh_token),
         )
 
+    @staticmethod
+    def _policy(obj):
+        try:
+            return obj.billing_policy
+        except Exception:
+            return None
+
+    def get_pool_name(self, obj):
+        policy = self._policy(obj)
+        return policy.pool.car_name if policy else ""
+
+    def get_pool_health_status(self, obj):
+        policy = self._policy(obj)
+        return policy.health_status if policy else ""
+
+    def get_active_bindings(self, obj):
+        annotated_count = getattr(obj, "active_bindings_count", None)
+        if annotated_count is not None:
+            return annotated_count
+        return obj.billing_assignments.filter(active=True).count()
+
+    def get_binding_limit(self, obj):
+        policy = self._policy(obj)
+        return policy.binding_limit if policy else None
+
+    def get_deletion_requires_migration(self, obj):
+        policy = self._policy(obj)
+        return bool(
+            self.get_active_bindings(obj)
+            and policy
+            and policy.enabled
+            and policy.health_status == "HEALTHY"
+            and obj.auth_status
+            and (obj.access_token_valid or obj.session_token_valid)
+        )
+
     class Meta:
         model = ChatgptAccount
         fields = (
@@ -96,6 +137,11 @@ class ShowChatgptTokenSerializer(serializers.ModelSerializer):
             "use_count",
             "supported_login_modes",
             "has_refresh_token",
+            "pool_name",
+            "pool_health_status",
+            "active_bindings",
+            "binding_limit",
+            "deletion_requires_migration",
         )
 
 
@@ -124,6 +170,7 @@ class RefreshChatgptTokenSerializer(serializers.Serializer):
 
 class DeleteChatgptAccountSerializer(serializers.Serializer):
     chatgpt_username = serializers.CharField()
+    migrate_users = serializers.BooleanField(required=False, default=False)
 
 class UpdateChatgptInfoSerializer(serializers.Serializer):
     chatgpt_username = serializers.CharField()

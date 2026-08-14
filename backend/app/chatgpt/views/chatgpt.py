@@ -2,6 +2,7 @@ import time
 
 import jwt
 from django.db import transaction
+from django.db.models import Count, Q
 from rest_framework import generics
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
@@ -91,7 +92,18 @@ class ChatGPTAccountView(generics.ListCreateAPIView):
     permission_classes = (IsAuthenticated, IsAdminUser)
 
     def get(self, request, *args, **kwargs):
-        queryset = ChatgptAccount.objects.filter(is_archived=False).order_by("-id")
+        queryset = (
+            ChatgptAccount.objects.filter(is_archived=False)
+            .select_related("billing_policy__pool")
+            .annotate(
+                active_bindings_count=Count(
+                    "billing_assignments",
+                    filter=Q(billing_assignments__active=True),
+                    distinct=True,
+                )
+            )
+            .order_by("-id")
+        )
         query = str(request.query_params.get("q") or "").strip()
         if query:
             queryset = queryset.filter(chatgpt_username__icontains=query)
@@ -162,11 +174,20 @@ class ChatGPTAccountView(generics.ListCreateAPIView):
         gpt_obj = ChatgptAccount.objects.filter(chatgpt_username=serializer.data["chatgpt_username"]).first()
         if gpt_obj:
             try:
-                archive_upstream_account(gpt_obj, actor=request.user)
+                result = archive_upstream_account(
+                    gpt_obj,
+                    actor=request.user,
+                    migrate_active_users=serializer.validated_data.get("migrate_users", False),
+                )
             except BillingError as exc:
                 raise ValidationError({"message": exc.message, "code": exc.code})
+            return Response({
+                "message": "账号已删除，凭据已清除，历史审计已保留",
+                "migrated_users": result["migrated_users"],
+                "released_users": result["released_users"],
+            })
 
-        return Response({"message": "账号已删除，凭据已清除，历史审计已保留"})
+        return Response({"message": "账号不存在或已删除"})
 
 
 class ChatGPTTokenExpiryView(APIView):
@@ -242,6 +263,7 @@ class ChatGPTLoginView(APIView):
                 managed_account = resolve_managed_account(
                     request.user,
                     preferred_policy_id=requested_id if requested_id is not None else None,
+                    rebalance=requested_id is None,
                 )
             except BillingError as exc:
                 raise ValidationError({"message": exc.message, "code": exc.code})
