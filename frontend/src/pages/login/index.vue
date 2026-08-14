@@ -90,7 +90,7 @@
                   variant="outline"
                   class="verification-button"
                   :loading="verificationSending"
-                  :disabled="loading || verificationSending || cooldown > 0 || (!deviceVerificationRequired && !humanVerificationReady)"
+                  :disabled="loading || verificationSending || cooldown > 0"
                   @click="requestVerificationCode"
                 >
                   {{ verificationButtonLabel }}
@@ -533,7 +533,11 @@ const requestVerificationCode = async () => {
     return
   }
   if (!deviceVerificationRequired.value && !humanVerificationReady.value) {
-    MessagePlugin.warning('请完成人机验证')
+    MessagePlugin.warning(
+      localCaptchaEnabled.value
+        ? '请先完成下方图形验证码，再发送邮箱验证码'
+        : '请先完成人机验证，再发送邮箱验证码'
+    )
     return
   }
 
