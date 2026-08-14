@@ -508,6 +508,39 @@ class BillingServiceTests(TestCase):
         self.assertFalse(current["auth_status"])
         self.assertEqual(current["health_status"], "DEGRADED")
 
+    def test_degraded_non_current_account_remains_visible_for_pool_switching(self):
+        _, subscription = self.purchase()
+        assignment = ensure_assignment(subscription)
+        policy = PoolAccountPolicy.objects.filter(pool=self.standard_pool).exclude(
+            account=assignment.account,
+        ).get()
+        policy.health_status = "DEGRADED"
+        policy.save(update_fields=["health_status", "updated_at"])
+        policy.account.auth_status = False
+        policy.account.access_token_valid = False
+        policy.account.session_token_valid = False
+        policy.account.save(update_fields=[
+            "auth_status",
+            "access_token_valid",
+            "session_token_valid",
+        ])
+        request = APIRequestFactory().get("/0x/user/chatgpt-list")
+        force_authenticate(request, user=self.user)
+
+        with (
+            patch.object(ChatgptAccount, "refresh_auth_diagnostics"),
+            patch("app.accounts.views.req_gateway", return_value={}),
+        ):
+            response = UserChatGPTAccountList.as_view()(request)
+
+        degraded = next(
+            (item for item in response.data["results"] if item["id"] == policy.id),
+            None,
+        )
+        self.assertIsNotNone(degraded)
+        self.assertFalse(degraded["auth_status"])
+        self.assertEqual(degraded["health_status"], "DEGRADED")
+
     @override_settings(PUBLIC_SITE_URL="https://mirror.example")
     @patch("app.cron.probe_web_session")
     def test_explicitly_revoked_web_session_marks_account_unusable(self, probe_web_session):
@@ -577,7 +610,7 @@ class BillingServiceTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.data["message"],
-            "失效账号已移出可用列表",
+            "失效账号已标记，请重新选择其他可用账号",
             msg={
                 "subscription_status": subscription.status,
                 "subscription_active": subscription.is_service_active,

@@ -65,16 +65,17 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/pages/login/index.vue')
   },
   {
-    path: '/login-chatgpt',
-    name: 'LoginChatgpt',
-    component: () => import('@/pages/login/chatgpt.vue')
-  },
-  {
     path: '/account',
     name: 'Account',
     component: () => import('@/layouts/index.vue'),
     redirect: '/account/overview',
     children: [
+      {
+        path: '/login-chatgpt',
+        name: 'LoginChatgpt',
+        component: () => import('@/pages/login/chatgpt.vue'),
+        meta: { title: '选择账号池' }
+      },
       {
         path: 'overview',
         name: 'Overview',

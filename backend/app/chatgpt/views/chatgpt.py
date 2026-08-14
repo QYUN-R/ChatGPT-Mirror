@@ -385,4 +385,4 @@ class ChatGPTSessionFailureView(APIView):
                 actor=user,
                 detail={"error_code": verified_error},
             )
-        return Response({"message": "失效账号已移出可用列表"})
+        return Response({"message": "失效账号已标记，请重新选择其他可用账号"})

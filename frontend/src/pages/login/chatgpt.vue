@@ -1,114 +1,148 @@
 <template>
-  <div>
-    <div v-if="!tableVisible" class="login-chatgpt-state">
+  <div class="account-entry-page">
+    <section v-if="tableLoading || loadFailed || !tableData.length" class="entry-state">
       <t-loading :loading="tableLoading" size="medium">
-        <div class="login-chatgpt-card">
-          <div class="login-chatgpt-title">正在准备 ChatGPT 会话</div>
-          <div class="login-chatgpt-desc">{{ statusText }}</div>
+        <div v-if="loadFailed" class="empty-state is-error">
+          <div class="empty-state__icon"><local-icon name="server" /></div>
+          <h2>账号池加载失败</h2>
+          <p>请检查网络后重试；如果持续出现，请联系管理员处理。</p>
+          <t-button theme="primary" @click="getUserChatGPTAccountList">重新加载</t-button>
+        </div>
+        <div v-else-if="!tableLoading && !tableData.length" class="empty-state">
+          <div class="empty-state__icon"><local-icon name="server" /></div>
+          <h2>目前没有可用账号，请联系管理员</h2>
+          <p>管理员添加或恢复上游账号后，可重新进入“进入使用”选择账号。</p>
+          <div class="empty-state__actions">
+            <t-button v-if="isAdmin" theme="primary" @click="router.push('/account/chatgpt')">
+              前往上游账号
+            </t-button>
+            <t-button v-else theme="primary" @click="router.push('/account/support')">
+              联系管理员
+            </t-button>
+            <t-button variant="outline" @click="getUserChatGPTAccountList">刷新状态</t-button>
+          </div>
+        </div>
+        <div v-else class="loading-placeholder">
+          <span>正在加载账号池...</span>
         </div>
       </t-loading>
-    </div>
+    </section>
+
     <t-dialog
-      :visible="tableVisible"
+      :visible="dialogVisible"
       header="请选择 ChatGPT 账号"
+      dialog-class-name="account-selector-dialog"
+      placement="center"
       :cancel-btn="null"
       :confirm-btn="null"
-      :on-close="onClose"
       width="930px"
+      @close="goAccountCenter"
     >
       <t-loading :loading="tableLoading">
-        <t-space direction="vertical" style="width: 100%; margin-bottom: 16px" :size="12">
+        <div class="dialog-content">
           <t-alert
             v-if="route.query.upstream === 'expired'"
             theme="error"
-            message="刚才使用的上游账号已失效，系统已将其移出可用账号列表，请重新选择。"
+            message="刚才使用的上游账号已失效，已在账号池中标记，请选择其他可用账号。"
           />
-          <div class="mode-switch">
-            <span class="mode-switch__label">登录模式</span>
-            <t-radio-group v-model="selectedMode" variant="default-filled">
-              <t-radio-button value="api">API 模式</t-radio-button>
-              <t-radio-button value="web">混合模式</t-radio-button>
-            </t-radio-group>
+
+          <div class="selector-toolbar">
+            <div class="mode-switch">
+              <span class="mode-switch__label">登录模式</span>
+              <t-radio-group v-model="selectedMode" variant="default-filled">
+                <t-radio-button value="api">API 模式</t-radio-button>
+                <t-radio-button value="web">混合模式</t-radio-button>
+              </t-radio-group>
+            </div>
+            <div class="selector-actions">
+              <t-button
+                theme="primary"
+                :disabled="!hasUsableAccountForMode"
+                @click="onSelect(null)"
+              >
+                {{ smartLoginLabel }}
+              </t-button>
+              <t-button variant="text" @click="goAccountCenter">账户中心</t-button>
+            </div>
           </div>
-          <t-space>
-            <t-button theme="primary" :disabled="tableLoading" @click="onSelect(null)">
-              {{ managedAssignment ? '使用当前分配账号' : '智能分配最空闲账号' }}
-            </t-button>
-            <t-button variant="text" @click="router.push('/account/profile')">账户中心</t-button>
-          </t-space>
+
           <t-alert
-            v-if="selectedMode === 'api'"
-            theme="info"
-            message="API 模式默认优先使用 AccessToken，可保证接口能力，但不承诺官方网页完整登录态。"
+            v-if="!usableAccountCount"
+            theme="error"
+            message="目前没有可用账号，请联系管理员。失效账号已保留在下方，恢复后可继续使用。"
           />
           <t-alert
             v-else
-            theme="warning"
-            message="混合模式会同时传入 AccessToken 与 SessionToken，优先建立网页态，同时保留 AccessToken 供接口链路回退。"
+            :theme="selectedMode === 'api' ? 'info' : 'warning'"
+            :message="selectedMode === 'api'
+              ? 'API 模式优先使用 AccessToken，适合接口能力。'
+              : '混合模式优先建立网页会话，并保留接口链路回退。'"
           />
-        </t-space>
-        <div class="account-grid">
-          <div
-            v-for="item in tableData"
-            :key="item.id"
-            class="account-card"
-            :class="{ 'is-disabled': !isAccountUsable(item, selectedMode) }"
-            @click="onSelect(item.id)"
-          >
-            <div style="background: #f2f4f7; padding: 8px; border-radius: 5px">
-              <t-space direction="vertical" style="width: 100%" :size="8">
-                <div>
-                  <div style="display: flex; justify-content: space-between">
-                    <t-tag
-                      size="small"
-                      theme="primary"
-                      variant="outline"
-                      style="width: 35px"
-                      :class="{ 'shiny-blue': item.plan_type !== 'free' }"
-                    >{{ item.plan_type }}</t-tag>
-                    <span class="account-card__name">
-                      {{ item.chatgpt_flag }}
-                      <t-tag v-if="item.is_current" size="small" theme="success" variant="light">正在使用</t-tag>
-                    </span>
-                  </div>
-                </div>
 
-                <div class="mode-tags">
-                  <t-tag size="small" :theme="item.access_token_valid ? 'success' : 'default'">
-                    API
-                  </t-tag>
-                  <t-tag size="small" :theme="item.session_token_valid ? 'success' : 'default'">
-                    混合
-                  </t-tag>
-                </div>
+          <div class="pool-summary">
+            <span><strong>{{ usableAccountCount }}</strong> 个可用</span>
+            <span><strong>{{ unavailableAccountCount }}</strong> 个失效</span>
+          </div>
 
-                <div style="font-size: 12px; display: flex; justify-content: space-between">
-                  <div>实时状态</div>
-                  <div>
-                    <span v-if="!isAccountHealthy(item)">账号失效</span>
-                    <span v-else-if="getGPTUsePercent(item) < 40">空闲</span>
-                    <span v-else-if="getGPTUsePercent(item) < 80">忙碌</span>
-                    <span v-else>繁忙 | 可用</span>
-                  </div>
-                </div>
+          <div class="account-grid">
+            <button
+              v-for="item in tableData"
+              :key="item.id"
+              class="account-card"
+              :class="{
+                'is-current': item.is_current,
+                'is-unavailable': !isAccountHealthy(item),
+                'is-mode-unavailable': isAccountHealthy(item) && !supportsMode(item, selectedMode),
+              }"
+              type="button"
+              :disabled="!isAccountUsable(item, selectedMode)"
+              :aria-label="`${item.chatgpt_flag}，${accountStatusLabel(item)}`"
+              @click="onSelect(item.id)"
+            >
+              <span class="account-card__topline">
+                <t-tag
+                  size="small"
+                  :theme="isAccountHealthy(item) ? 'primary' : 'danger'"
+                  :variant="isAccountHealthy(item) ? 'outline' : 'light'"
+                >
+                  {{ planLabel(item.plan_type) }}
+                </t-tag>
+                <span class="account-card__name">{{ item.chatgpt_flag }}</span>
+              </span>
 
-                <div>
-                  <t-progress
-                    v-if="getGPTUsePercent(item) < 40"
-                    :percentage="getGPTUsePercent(item)"
-                    status="success"
-                    :label="false"
-                  />
-                  <t-progress
-                    v-else-if="getGPTUsePercent(item) < 80"
-                    :percentage="getGPTUsePercent(item)"
-                    status="warning"
-                    :label="false"
-                  />
-                  <t-progress v-else :percentage="getGPTUsePercent(item)" status="error" :label="false" />
-                </div>
-              </t-space>
-            </div>
+              <span class="account-card__tags">
+                <t-tag size="small" :theme="item.access_token_valid ? 'success' : 'default'" variant="light">
+                  API
+                </t-tag>
+                <t-tag size="small" :theme="item.session_token_valid ? 'success' : 'default'" variant="light">
+                  混合
+                </t-tag>
+                <t-tag v-if="item.is_current" size="small" theme="success" variant="light">
+                  当前
+                </t-tag>
+              </span>
+
+              <span class="account-card__status">
+                <span>实时状态</span>
+                <strong :class="{ danger: !isAccountHealthy(item) }">{{ accountStatusLabel(item) }}</strong>
+              </span>
+
+              <t-progress
+                v-if="isAccountHealthy(item)"
+                :percentage="getGPTUsePercent(item)"
+                :status="usageStatus(item)"
+                :label="false"
+              />
+              <span v-else class="invalid-bar">账号失效，请选择其他账号</span>
+            </button>
+          </div>
+
+          <div class="dialog-footer-note">
+            <span>失效账号不会自动进入，其他可用账号可随时切换。</span>
+            <t-button variant="outline" size="small" :loading="tableLoading" @click="getUserChatGPTAccountList">
+              <template #icon><local-icon name="refresh" /></template>
+              刷新账号状态
+            </t-button>
           </div>
         </div>
       </t-loading>
@@ -118,17 +152,10 @@
 
 <script setup lang="ts">
 import { MessagePlugin } from 'tdesign-vue-next'
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import request from '@/api/request'
 import { useUserStore } from '@/store/user'
-
-const tableLoading = ref(false)
-const route = useRoute()
-const router = useRouter()
-const userStore = useUserStore()
-const tableVisible = ref(false)
-const statusText = ref('正在加载可用账号...')
 
 interface TableData {
   id: number
@@ -144,75 +171,79 @@ interface TableData {
   health_status?: string
   last_error?: string
 }
+
+const tableLoading = ref(false)
+const loadFailed = ref(false)
+const dialogVisible = ref(false)
+const route = useRoute()
+const router = useRouter()
+const userStore = useUserStore()
 const tableData = ref<TableData[]>([])
 const managedAssignment = ref(false)
 const selectedMode = ref<'api' | 'web'>('web')
-const preferredMode = ref<'api' | 'web'>('web')
+
+const isAdmin = computed(() => userStore.isAdmin)
+const usableAccountCount = computed(() => tableData.value.filter(isAccountHealthy).length)
+const unavailableAccountCount = computed(() => tableData.value.length - usableAccountCount.value)
+const hasUsableAccountForMode = computed(() =>
+  tableData.value.some(item => isAccountUsable(item, selectedMode.value)),
+)
+const currentAccountUsable = computed(() =>
+  tableData.value.some(item => item.is_current && isAccountUsable(item, selectedMode.value)),
+)
+const smartLoginLabel = computed(() =>
+  managedAssignment.value && currentAccountUsable.value
+    ? '继续使用当前账号'
+    : '智能分配可用账号',
+)
 
 onMounted(async () => {
-  if (route.query.logout === '1') {
-    userStore.logout()
-  }
-  preferredMode.value = route.query.mode === 'api' ? 'api' : 'web'
-  selectedMode.value = preferredMode.value
+  selectedMode.value = route.query.mode === 'api' ? 'api' : 'web'
   await getUserChatGPTAccountList()
 })
 
 const getGPTUsePercent = (item: TableData) => {
-  const MaxLimitCount = item.plan_type === 'free' ? 80 : 320
-  return Math.min((item.use_count / MaxLimitCount) * 100 + 1, 99)
+  const maxLimitCount = item.plan_type === 'free' ? 80 : 320
+  return Math.min((Number(item.use_count || 0) / maxLimitCount) * 100 + 1, 99)
 }
 
 const getUserChatGPTAccountList = async () => {
   tableLoading.value = true
-  statusText.value = '正在加载可用账号...'
+  loadFailed.value = false
   const data = await request('/0x/user/chatgpt-list')
   tableLoading.value = false
-  
+
   if (!data) {
-    statusText.value = '账号列表加载失败，请重新登录或稍后重试'
+    dialogVisible.value = false
+    loadFailed.value = true
     return
   }
-  
-  const results = data.results || []
+
+  const results: TableData[] = data.results || []
   tableData.value = results
   managedAssignment.value = Boolean(data.managed_assignment)
 
-  if (results.length > 0 && !results.some((item: TableData) => supportsMode(item, selectedMode.value))) {
+  const healthyAccounts = results.filter(isAccountHealthy)
+  if (healthyAccounts.length && !healthyAccounts.some(item => supportsMode(item, selectedMode.value))) {
     const fallbackMode = selectedMode.value === 'web' ? 'api' : 'web'
-    if (results.some((item: TableData) => supportsMode(item, fallbackMode))) {
+    if (healthyAccounts.some(item => supportsMode(item, fallbackMode))) {
       selectedMode.value = fallbackMode
       MessagePlugin.info(
         fallbackMode === 'api'
-          ? '当前没有支持混合模式的账号，已切换到 API 模式'
-          : '当前没有支持 API 模式的账号，已切换到混合模式',
+          ? '当前没有支持混合模式的可用账号，已切换到 API 模式'
+          : '当前没有支持 API 模式的可用账号，已切换到混合模式',
       )
     }
   }
-  
-  if (results.length === 0) {
-    MessagePlugin.warning('暂无可用的 ChatGPT 账号，请联系管理员添加')
-    statusText.value = '暂无可用的 ChatGPT 账号，请联系管理员添加'
-  } else {
-    if (results.length === 1 && results[0].auth_status && !supportsMode(results[0], selectedMode.value)) {
-      if (supportsMode(results[0], 'api')) {
-        selectedMode.value = 'api'
-        statusText.value = '该账号当前不支持混合模式，已切回 API 模式，请确认登录'
-      } else if (supportsMode(results[0], 'web')) {
-        selectedMode.value = 'web'
-        statusText.value = '该账号当前仅支持混合模式，请确认登录'
-      }
-    }
-    tableVisible.value = true
-  }
-}
 
-const onClose = () => {
-  router.push({ name: 'Login' })
+  dialogVisible.value = results.length > 0
 }
 
 const supportsMode = (item: TableData, mode: 'api' | 'web') => {
-  return Array.isArray(item.supported_login_modes) && item.supported_login_modes.includes(mode)
+  if (Array.isArray(item.supported_login_modes)) {
+    return item.supported_login_modes.includes(mode)
+  }
+  return mode === 'api' ? Boolean(item.access_token_valid) : Boolean(item.session_token_valid)
 }
 
 const isAccountHealthy = (item: TableData) => {
@@ -221,6 +252,40 @@ const isAccountHealthy = (item: TableData) => {
 
 const isAccountUsable = (item: TableData, mode: 'api' | 'web') => {
   return isAccountHealthy(item) && supportsMode(item, mode)
+}
+
+const planLabel = (planType: string) => {
+  const normalized = String(planType || 'free').trim().toLowerCase()
+  const labels: Record<string, string> = {
+    free: 'free',
+    plus: 'plus',
+    pro: 'pro',
+    team: 'team',
+    business: 'business',
+    enterprise: 'enterprise',
+  }
+  return labels[normalized] || planType || 'ChatGPT'
+}
+
+const accountStatusLabel = (item: TableData) => {
+  if (!isAccountHealthy(item)) return '账号失效'
+  if (!supportsMode(item, selectedMode.value)) return '当前模式不可用'
+  const percentage = getGPTUsePercent(item)
+  if (percentage < 40) return '空闲'
+  if (percentage < 80) return '忙碌'
+  return '繁忙但可用'
+}
+
+const usageStatus = (item: TableData): 'success' | 'warning' | 'error' => {
+  const percentage = getGPTUsePercent(item)
+  if (percentage < 40) return 'success'
+  if (percentage < 80) return 'warning'
+  return 'error'
+}
+
+const goAccountCenter = () => {
+  dialogVisible.value = false
+  router.push(isAdmin.value ? '/account/overview' : '/account/billing')
 }
 
 const onSelect = async (chatgptId: number | null) => {
@@ -232,117 +297,327 @@ const onSelect = async (chatgptId: number | null) => {
   if (current && !supportsMode(current, selectedMode.value)) {
     MessagePlugin.warning(
       selectedMode.value === 'api'
-        ? '该账号当前不支持 API 模式，请切换到混合模式或联系管理员更新 AccessToken'
-        : '该账号当前不支持混合模式，请切换到 API 模式或联系管理员补录 SessionToken',
+        ? '该账号当前不支持 API 模式，请切换到混合模式'
+        : '该账号当前不支持混合模式，请切换到 API 模式',
     )
+    return
+  }
+  if (chatgptId === null && !hasUsableAccountForMode.value) {
+    MessagePlugin.warning('当前没有支持所选模式的可用账号')
     return
   }
 
   tableLoading.value = true
-  statusText.value =
-    selectedMode.value === 'api'
-      ? '正在以 API 模式登录 ChatGPT，请稍候...'
-      : '正在以混合模式登录 ChatGPT，请稍候...'
   const data = await request('/0x/chatgpt/login', 'POST', {
     chatgpt_id: chatgptId,
     login_mode: selectedMode.value,
   })
   tableLoading.value = false
-  
-  if (data) {
-    sessionStorage.setItem('tuwugpt.activePoolAccountId', String(chatgptId ?? ''))
-    MessagePlugin.success('登录成功')
-    if (data.login_url) {
-      window.location.replace(data.login_url)
-      return
-    }
-  }
 
-  if (!tableVisible.value) {
-    statusText.value = '登录失败，请返回重试'
+  if (!data) return
+  sessionStorage.setItem('tuwugpt.activePoolAccountId', String(chatgptId ?? ''))
+  MessagePlugin.success('登录成功')
+  if (data.login_url) {
+    window.location.replace(data.login_url)
   }
 }
 </script>
 
 <style scoped>
-.login-chatgpt-state {
-  min-height: 70vh;
+.account-entry-page {
+  min-width: 0;
+}
+
+.entry-state {
+  min-height: 420px;
+}
+
+.entry-state :deep(.t-loading) {
+  display: block;
+  min-height: 420px;
+}
+
+.loading-placeholder,
+.empty-state {
+  display: flex;
+  min-height: 420px;
+  padding: 48px 24px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  color: var(--app-text-muted);
+  text-align: center;
+  background: var(--app-surface);
+  border: 1px dashed var(--app-border-strong);
+  border-radius: 8px;
+}
+
+.empty-state.is-error {
+  border-color: #e3b3ad;
+}
+
+.empty-state__icon {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  color: #4f8061;
+  font-size: 24px;
+  background: #eef3ef;
+  border-radius: 50%;
+}
+
+.empty-state h2 {
+  margin: 16px 0 0;
+  color: var(--app-text);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.empty-state p {
+  max-width: 460px;
+  margin: 8px 0 20px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.empty-state__actions {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
-.login-chatgpt-card {
-  min-width: 320px;
-  padding: 24px 28px;
-  border-radius: 12px;
-  background: #fff;
-  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.08);
-  text-align: center;
+.dialog-content {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
 }
 
-.login-chatgpt-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: #111827;
-}
-
-.login-chatgpt-desc {
-  margin-top: 10px;
-  color: #6b7280;
-  font-size: 14px;
-}
-
-.mode-switch {
+.selector-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 18px;
+}
+
+.mode-switch,
+.selector-actions,
+.pool-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
 .mode-switch__label {
-  color: #111827;
+  color: var(--app-text);
   font-size: 14px;
   font-weight: 600;
 }
 
-.mode-tags {
-  display: flex;
-  gap: 6px;
+.pool-summary {
+  color: var(--app-text-muted);
+  font-size: 12px;
 }
 
-.account-card__name {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  min-width: 0;
-  gap: 6px;
+.pool-summary strong {
+  color: var(--app-text);
+  font-size: 14px;
 }
 
 .account-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 12px;
+  min-height: 136px;
 }
 
 .account-card {
+  display: flex;
   min-width: 0;
+  min-height: 138px;
+  padding: 12px;
+  flex-direction: column;
+  color: var(--app-text);
+  text-align: left;
   cursor: pointer;
+  background: #f5f6f7;
+  border: 1px solid transparent;
+  border-radius: 7px;
 }
 
-.is-disabled {
-  opacity: 0.5;
-  pointer-events: none;
+.account-card:hover:not(:disabled) {
+  background: #f0f3f1;
+  border-color: #9ab8a3;
 }
 
-.shiny-blue {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  border: none;
+.account-card.is-current {
+  border-color: #79a789;
+  box-shadow: inset 3px 0 0 #4f8061;
 }
 
-@media (max-width: 620px) {
-  .login-chatgpt-card { width: min(100%, 330px); min-width: 0; padding: 20px; }
-  .mode-switch { align-items: flex-start; flex-direction: column; gap: 10px; }
-  .account-grid { grid-template-columns: 1fr; }
+.account-card.is-unavailable {
+  background: #fbefed;
+  border-color: #e1b6b0;
+}
+
+.account-card.is-mode-unavailable {
+  background: #fbfaf4;
+  border-color: #ded6b7;
+}
+
+.account-card:disabled {
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.account-card__topline,
+.account-card__status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.account-card__name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-card__tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 12px;
+}
+
+.account-card__status {
+  margin: 14px 0 8px;
+  color: var(--app-text-muted);
+  font-size: 12px;
+}
+
+.account-card__status strong {
+  color: var(--app-text);
+  font-weight: 500;
+}
+
+.account-card__status strong.danger {
+  color: #a54238;
+}
+
+.invalid-bar {
+  display: block;
+  padding: 6px 8px;
+  color: #9f443b;
+  font-size: 11px;
+  line-height: 1.4;
+  background: #f4deda;
+  border-radius: 5px;
+}
+
+.dialog-footer-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 12px;
+  color: var(--app-text-muted);
+  font-size: 12px;
+  border-top: 1px solid var(--app-border);
+}
+
+:global(.account-selector-dialog) {
+  display: flex;
+  max-height: calc(100dvh - 32px);
+  flex-direction: column;
+  overflow: hidden;
+}
+
+:global(.account-selector-dialog .t-dialog__header) {
+  flex: 0 0 auto;
+}
+
+:global(.account-selector-dialog .t-dialog__body) {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+@media (max-width: 700px) {
+  .selector-toolbar,
+  .dialog-footer-note {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .selector-actions {
+    justify-content: flex-start;
+  }
+
+  .account-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  :global(.t-dialog__position:has(.account-selector-dialog)) {
+    box-sizing: border-box;
+    height: 100% !important;
+    min-height: 0 !important;
+    padding: max(12px, env(safe-area-inset-top)) 0 max(12px, env(safe-area-inset-bottom)) !important;
+  }
+
+  :global(.account-selector-dialog) {
+    width: calc(100vw - 24px) !important;
+    max-height: 100%;
+    margin: 0 auto;
+  }
+
+  .mode-switch {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .mode-switch :deep(.t-radio-group) {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .mode-switch :deep(.t-radio-button) {
+    justify-content: center;
+  }
+
+  .selector-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .selector-actions :deep(.t-button),
+  .dialog-footer-note :deep(.t-button) {
+    width: 100%;
+  }
+
+  .account-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .empty-state__actions {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .empty-state__actions :deep(.t-button) {
+    width: 100%;
+  }
 }
 </style>

@@ -132,8 +132,11 @@ class UserChatGPTAccountList(APIView):
                 policy.account
                 for policy in managed_policies
                 if (
-                    policy.enabled and policy.health_status == "HEALTHY"
-                    or managed_assignment and policy.account_id == managed_assignment.account_id
+                    policy.enabled
+                    or (
+                        managed_assignment
+                        and policy.account_id == managed_assignment.account_id
+                    )
                 )
             ]
             if managed
@@ -157,9 +160,9 @@ class UserChatGPTAccountList(APIView):
 
         current_minute = datetime.now().minute
 
-        visible_accounts = user_gpt_list if managed else (
-            [i for i in user_gpt_list if i.auth_status] or user_gpt_list
-        )
+        # Keep unhealthy accounts visible so users can understand why an account
+        # cannot be entered and switch to another healthy account in the pool.
+        visible_accounts = user_gpt_list
         policy_by_account_id = {policy.account_id: policy for policy in managed_policies}
         for index, line in enumerate(visible_accounts, start=1):
             gpt_use_count_dict = use_count_dict.get(line.chatgpt_username, {}).get("gpt-4o", {})
