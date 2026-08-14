@@ -43,7 +43,7 @@ from app.billing.services import (
     sync_commercial_pool_accounts,
 )
 from app.chatgpt.models import ChatgptAccount, ChatgptCar
-from app.chatgpt.views.chatgpt import ChatGPTLoginView, ChatGPTSessionFailureView
+from app.chatgpt.views.chatgpt import ChatGPTAccountEnum, ChatGPTLoginView, ChatGPTSessionFailureView
 from app.chatgpt.views.gptcar import GptCarEnum, GptCarView
 from app.billing.admin_views import AdminPlanView, AdminPoolView
 from app.fields import decrypt_value
@@ -123,10 +123,10 @@ class BillingServiceTests(TestCase):
         )
 
     @staticmethod
-    def create_account(username):
+    def create_account(username, plan_type="plus"):
         return ChatgptAccount.objects.create(
             chatgpt_username=username,
-            plan_type="plus",
+            plan_type=plan_type,
             access_token="test-access-token",
             auth_status=True,
             access_token_valid=True,
@@ -846,7 +846,7 @@ class BillingServiceTests(TestCase):
         self.assertNotIn(self.standard_pool.id, visible_ids)
         self.assertNotIn(self.premium_pool.id, visible_ids)
 
-    def test_legacy_pool_api_rejects_commercial_accounts(self):
+    def test_legacy_pool_api_rejects_accounts_managed_by_a_plan_pool(self):
         free_pool = ChatgptCar.objects.create(
             car_name="free-edit-pool",
             gpt_account_list=[],
@@ -869,7 +869,52 @@ class BillingServiceTests(TestCase):
         response = GptCarView.as_view()(request)
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("商业号池", str(response.data["message"]))
+        self.assertIn("套餐号池", str(response.data["message"]))
+
+    def test_legacy_pool_api_accepts_any_unmanaged_account_type(self):
+        legacy_pool = ChatgptCar.objects.create(
+            car_name="legacy-mixed-pool",
+            gpt_account_list=[],
+            created_time=1,
+            updated_time=1,
+        )
+        accounts = [
+            self.create_account(f"legacy-{index}@example.com", plan_type=plan_type)
+            for index, plan_type in enumerate(("free", "plus", "team", "go"), start=1)
+        ]
+        admin = User.objects.create_superuser(username="legacy-mixed-admin", password="Strong-password-123!")
+        request = APIRequestFactory().post(
+            "/0x/chatgpt/car",
+            {
+                "id": legacy_pool.id,
+                "car_name": legacy_pool.car_name,
+                "gpt_account_list": [account.id for account in accounts],
+                "remark": "",
+            },
+            format="json",
+        )
+        force_authenticate(request, user=admin)
+
+        response = GptCarView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        legacy_pool.refresh_from_db()
+        self.assertEqual(set(legacy_pool.gpt_account_list), {account.id for account in accounts})
+
+    def test_legacy_account_enum_filters_by_pool_membership_not_plan_type(self):
+        free_account = self.create_account("legacy-free@example.com", plan_type="free")
+        go_account = self.create_account("legacy-go@example.com", plan_type="go")
+        unmanaged_plus = self.create_account("legacy-plus@example.com", plan_type="plus")
+        admin = User.objects.create_superuser(username="legacy-enum-admin", password="Strong-password-123!")
+        request = APIRequestFactory().get("/0x/chatgpt/enum")
+        force_authenticate(request, user=admin)
+
+        response = ChatGPTAccountEnum.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        visible_ids = {row["id"] for row in response.data["data"]}
+        self.assertTrue({free_account.id, go_account.id, unmanaged_plus.id}.issubset(visible_ids))
+        self.assertNotIn(self.standard_accounts[0].id, visible_ids)
 
     def test_pool_centric_sync_adds_multiple_accounts_and_preserves_existing_limits(self):
         existing_policy = PoolAccountPolicy.objects.get(account=self.standard_accounts[0])
@@ -895,6 +940,48 @@ class BillingServiceTests(TestCase):
             {self.standard_accounts[0].id, new_account.id},
         )
         self.assertFalse(PoolAccountPolicy.objects.filter(account=self.standard_accounts[1]).exists())
+
+    def test_pool_centric_sync_accepts_every_upstream_account_type(self):
+        mixed_pool = ChatgptCar.objects.create(
+            car_name="mixed-account-pool",
+            gpt_account_list=[],
+            is_commercial=True,
+            created_time=1,
+            updated_time=1,
+        )
+        accounts = [
+            self.create_account(f"mixed-{index}@example.com", plan_type=plan_type)
+            for index, plan_type in enumerate(("free", "plus", "team", "go", "future-plan"), start=1)
+        ]
+
+        sync_commercial_pool_accounts(
+            mixed_pool,
+            tier=PoolTier.STANDARD,
+            account_ids=[account.id for account in accounts],
+            default_binding_limit=4,
+            apply_binding_limit=True,
+        )
+
+        mixed_pool.refresh_from_db()
+        self.assertEqual(set(mixed_pool.gpt_account_list), {account.id for account in accounts})
+        self.assertEqual(
+            set(PoolAccountPolicy.objects.filter(pool=mixed_pool).values_list("account__plan_type", flat=True)),
+            {"free", "plus", "team", "go", "future-plan"},
+        )
+
+    def test_go_account_can_serve_a_paid_plan(self):
+        PoolAccountPolicy.objects.filter(pool=self.standard_pool).delete()
+        account = self.create_account("go-plan@example.com", plan_type="go")
+        sync_commercial_pool_accounts(
+            self.standard_pool,
+            tier=PoolTier.STANDARD,
+            account_ids=[account.id],
+        )
+
+        _, subscription = self.purchase()
+        assignment = ensure_assignment(subscription)
+
+        self.assertEqual(assignment.account_id, account.id)
 
     def test_pool_centric_sync_rejects_account_that_belongs_to_another_pool(self):
         with self.assertRaises(BillingError) as captured:

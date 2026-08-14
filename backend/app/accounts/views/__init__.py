@@ -295,7 +295,7 @@ class UserRelateGPTCarView(APIView):
         user_ids = serializer.validated_data["user_id_list"]
         pool_ids = list(dict.fromkeys(serializer.validated_data["gptcar_id_list"]))
         if ChatgptCar.objects.filter(id__in=pool_ids, is_commercial=True).exists():
-            raise ValidationError({"message": "商业号池由套餐自动管理，不能通过旧批量绑定接口分配"})
+            raise ValidationError({"message": "套餐号池由套餐自动管理，不能通过旧批量绑定接口分配"})
         if ChatgptCar.objects.filter(id__in=pool_ids).count() != len(pool_ids):
             raise ValidationError({"message": "部分账号池不存在"})
 
@@ -305,7 +305,7 @@ class UserRelateGPTCarView(APIView):
                 raise ValidationError({"message": "部分用户不存在"})
             managed_users = [user.username for user in users if has_managed_subscription(user)]
             if managed_users:
-                raise ValidationError({"message": "套餐用户的商业号池由套餐自动管理，不能手动绑定"})
+                raise ValidationError({"message": "套餐用户的套餐号池由套餐自动管理，不能手动绑定"})
             for user in users:
                 user.gptcar_list = pool_ids
                 user.save(update_fields=["gptcar_list"])

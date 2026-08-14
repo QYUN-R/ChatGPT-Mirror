@@ -195,13 +195,13 @@
             v-model="formData.gptcar_list"
             multiple
             :disabled="Boolean(activeSubscription)"
-            :placeholder="activeSubscription ? '由套餐配置自动管理' : '请选择免费或非商业号池'"
+            :placeholder="activeSubscription ? '由套餐配置自动管理' : '请选择传统号池'"
           >
             <t-option v-for="car in carOptions" :key="car.id" :value="car.id" :label="car.car_name" />
           </t-select>
           <template #help>
             <span class="form-help">
-              {{ activeSubscription ? `${activeSubscription.plan_name} 用户只能使用该套餐关联的商业号池` : '商业账号请到“商业号池”页面维护' }}
+              {{ activeSubscription ? `${activeSubscription.plan_name} 用户只能使用该套餐关联的套餐号池` : '套餐账号请到“套餐号池”页面维护' }}
             </span>
           </template>
         </t-form-item>

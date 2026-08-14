@@ -20,8 +20,8 @@
     <section class="admin-section">
       <div class="section-heading">
         <div>
-          <h2>商业号池</h2>
-          <p>一行管理一个号池，可一次关联多个账号；账号人数、健康状态和使用用户在展开详情中维护</p>
+          <h2>套餐号池</h2>
+          <p>支持混合加入 Free、Plus、Team、Go 等任意类型账号；人数、健康状态和使用用户在展开详情中维护</p>
         </div>
         <t-button theme="primary" @click="openCreatePoolDialog">
           <template #icon><local-icon name="add" /></template>
@@ -122,7 +122,7 @@
     >
       <t-form :data="poolForm" label-width="112px">
         <t-form-item label="号池名称">
-          <t-input v-model="poolForm.pool_name" placeholder="例如 Plus 普通号池" />
+          <t-input v-model="poolForm.pool_name" placeholder="例如普通套餐号池" />
         </t-form-item>
         <t-form-item label="套餐等级">
           <t-radio-group v-model="poolForm.tier">
@@ -136,7 +136,7 @@
             multiple
             filterable
             :min-collapsed-num="3"
-            placeholder="可一次选择多个 Plus、Pro、Team 或 Business 账号"
+            placeholder="可一次选择多个任意类型的上游账号"
           >
             <t-option
               v-for="account in selectableAccounts"
@@ -147,7 +147,7 @@
             />
           </t-select>
           <template #help>
-            <span class="form-help">同一账号只能属于一个商业号池；已在其他号池的账号需先从原号池移出。</span>
+            <span class="form-help">账号类型不限；加入后会从传统号池移出。同一账号只能属于一个套餐号池。</span>
           </template>
         </t-form-item>
         <t-form-item label="新账号默认上限">
@@ -305,7 +305,6 @@ const accountPoolMap = computed(() => {
 })
 
 const selectableAccounts = computed(() => accounts.value
-  .filter(account => ['plus', 'pro', 'team', 'business'].some(marker => String(account.plan_type || '').toLowerCase().includes(marker)))
   .map(account => ({ ...account, ...(accountPoolMap.value[account.id] || {}) })))
 
 const tierLabel = (value: string) => value === 'PREMIUM' ? '高级' : '普通'
@@ -378,7 +377,7 @@ const savePoolAccounts = async () => {
     })
     if (!data) return
     poolDialogVisible.value = false
-    MessagePlugin.success(data.message || '商业号池账号已保存')
+    MessagePlugin.success(data.message || '套餐号池账号已保存')
     await loadData()
   } finally {
     submitting.value = false

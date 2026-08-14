@@ -22,7 +22,6 @@ from rest_framework.exceptions import ValidationError
 from django.utils import timezone
 
 from app.billing.exceptions import BillingError
-from app.billing.models import supports_commercial_pool_account
 from app.billing.services import (
     _web_probe_invalidates_credentials,
     audit,
@@ -75,7 +74,11 @@ class ChatGPTAccountEnum(APIView):
     permission_classes = (IsAuthenticated, IsAdminUser)
 
     def get(self, request):
-        accounts = ChatgptAccount.objects.filter(auth_status=True, is_archived=False).order_by("-id")
+        accounts = ChatgptAccount.objects.filter(
+            auth_status=True,
+            is_archived=False,
+            billing_policy__isnull=True,
+        ).order_by("-id")
         result = [
             {
                 "id": account.id,
@@ -83,7 +86,6 @@ class ChatGPTAccountEnum(APIView):
                 "plan_type": account.plan_type,
             }
             for account in accounts
-            if not supports_commercial_pool_account(account)
         ]
         return Response({"data": result})
 

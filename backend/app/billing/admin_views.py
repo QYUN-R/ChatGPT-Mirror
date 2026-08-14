@@ -124,7 +124,7 @@ class AdminPlanView(APIView):
                 if not pool.is_commercial and pool.id not in auto_convertible_pools
             }
             if invalid_pool_ids:
-                raise ValidationError({"pool_ids": "套餐只能关联在套餐号池页面维护的商业号池"})
+                raise ValidationError({"pool_ids": "套餐只能关联在套餐号池页面维护的号池"})
             requested_pool = pools_by_id[requested_pool_ids[0]]
             requested_tier = request.data.get("pool_tier")
             try:
@@ -347,7 +347,7 @@ class AdminPoolView(APIView):
                 )
             except BillingError as exc:
                 admin_error(exc)
-            return Response({"message": "商业号池账号已保存"})
+            return Response({"message": "套餐号池账号已保存"})
         if action == "save_policy":
             account = get_object_or_404(ChatgptAccount, pk=request.data.get("account_id"), is_archived=False)
             policy = PoolAccountPolicy.objects.filter(account=account).first() or PoolAccountPolicy(account=account)

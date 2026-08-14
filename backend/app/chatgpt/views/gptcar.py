@@ -8,7 +8,6 @@ from rest_framework.views import APIView
 from app.chatgpt.models import ChatgptCar
 from app.chatgpt.models import ChatgptAccount
 from app.chatgpt.serializers import ShowGptCarSerializer, AddChatgptCarModelSerializer, DeleteChatgptCarSerializer
-from app.billing.models import supports_commercial_pool_account
 from app.page import DefaultPageNumberPagination
 
 
@@ -37,15 +36,18 @@ class GptCarView(generics.ListCreateAPIView):
         obj = ChatgptCar.objects.filter(id=request.data.get("id")).first()
         protected_pool_ids = commercial_pool_ids()
         if obj and obj.id in protected_pool_ids:
-            raise ValidationError({"message": "商业号池请在“商业号池”页面维护，避免套餐账号混乱"})
+            raise ValidationError({"message": "套餐号池请在“套餐号池”页面维护，避免账号分配混乱"})
         requested_account_ids = request.data.get("gpt_account_list") or []
-        commercial_accounts = [
+        managed_accounts = [
             account.chatgpt_username
-            for account in ChatgptAccount.objects.filter(id__in=requested_account_ids, is_archived=False)
-            if supports_commercial_pool_account(account)
+            for account in ChatgptAccount.objects.filter(
+                id__in=requested_account_ids,
+                is_archived=False,
+                billing_policy__isnull=False,
+            )
         ]
-        if commercial_accounts:
-            raise ValidationError({"message": "Plus、Pro、Team、Business 账号只能在“商业号池”页面维护"})
+        if managed_accounts:
+            raise ValidationError({"message": "已加入套餐号池的账号只能在“套餐号池”页面维护"})
         serializer = AddChatgptCarModelSerializer(instance=obj, data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save()
@@ -55,6 +57,6 @@ class GptCarView(generics.ListCreateAPIView):
         serializer = DeleteChatgptCarSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         if commercial_pool_ids().intersection(serializer.data["ids"]):
-            raise ValidationError({"message": "商业号池不能在旧账号池页面删除"})
+            raise ValidationError({"message": "套餐号池不能在传统账号池页面删除"})
         ChatgptCar.objects.filter(id__in=serializer.data["ids"]).delete()
         return Response({"message": "删除成功"})

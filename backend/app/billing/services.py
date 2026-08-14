@@ -33,7 +33,6 @@ from app.billing.models import (
     UsageEvent,
     UsageResult,
     UserNotification,
-    supports_commercial_pool_account,
 )
 from app.billing.payment import (
     ALIPAY_CLOSED_STATUSES,
@@ -770,7 +769,6 @@ def _policy_is_usable(policy):
         and not account.is_archived
         and account.auth_status
         and (account.access_token_valid or account.session_token_valid)
-        and supports_commercial_pool_account(account)
     )
 
 
@@ -853,13 +851,6 @@ def sync_commercial_pool_accounts(
     )
     if len(accounts) != len(selected_ids):
         raise BillingError("部分上游账号不存在或已删除", code="account_not_found")
-    invalid_accounts = [account.chatgpt_username for account in accounts if not supports_commercial_pool_account(account)]
-    if invalid_accounts:
-        raise BillingError(
-            "套餐号池只允许加入 Plus、Pro、Team 或 Business 账号",
-            code="unsupported_commercial_account",
-        )
-
     current_policies = list(
         PoolAccountPolicy.objects.select_for_update()
         .select_related("account", "pool")

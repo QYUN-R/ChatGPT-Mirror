@@ -1,6 +1,6 @@
 <template>
   <div>
-    <t-card title="免费账号池" subtitle="仅维护 Free 或非商业账号；Plus、Pro、Team、Business 请在套餐号池中管理" :bordered="false">
+    <t-card title="传统账号池" subtitle="可使用任意类型账号；已加入套餐号池的账号不会在这里重复显示" :bordered="false">
       <template #actions>
         <t-button theme="primary" @click="showAddDialog">
           <template #icon><local-icon name="add" /></template>

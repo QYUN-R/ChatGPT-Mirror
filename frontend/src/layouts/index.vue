@@ -129,7 +129,7 @@ const adminNavigation: NavigationSection[] = [
       { label: '运维概览', path: '/account/overview', icon: 'dashboard' },
       { label: '用户', path: '/account/user', icon: 'user' },
       { label: '上游账号', path: '/account/chatgpt', icon: 'root-list' },
-      { label: '免费账号池', path: '/account/gptcar', icon: 'server' }
+      { label: '传统账号池', path: '/account/gptcar', icon: 'server' }
     ]
   },
   {

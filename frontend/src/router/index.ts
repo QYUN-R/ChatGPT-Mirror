@@ -98,7 +98,7 @@ const routes: RouteRecordRaw[] = [
         path: 'gptcar',
         name: 'GptCar',
         component: () => import('@/pages/account/gptcar.vue'),
-        meta: { title: '免费账号池', requiresAdmin: true }
+        meta: { title: '传统账号池', requiresAdmin: true }
       },
       {
         path: 'plans',

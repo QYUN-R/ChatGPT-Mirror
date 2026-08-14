@@ -11,14 +11,6 @@ from django.utils import timezone
 from app.chatgpt.models import ChatgptAccount, ChatgptCar
 
 
-COMMERCIAL_ACCOUNT_PLAN_MARKERS = ("plus", "pro", "team", "business")
-
-
-def supports_commercial_pool_account(account):
-    plan_type = (account.plan_type or "").strip().lower()
-    return any(marker in plan_type for marker in COMMERCIAL_ACCOUNT_PLAN_MARKERS)
-
-
 class PoolTier(models.TextChoices):
     STANDARD = "STANDARD", "普通 Plus 池"
     PREMIUM = "PREMIUM", "高级 Plus 池"
@@ -520,8 +512,6 @@ class PoolAccountPolicy(TimestampedModel):
         errors = {}
         if self.binding_limit < 1:
             errors["binding_limit"] = "单账号承载上限必须至少为 1"
-        if self.account_id and not supports_commercial_pool_account(self.account):
-            errors["account"] = "商业号池只允许加入 Plus、Pro、Team 或 Business 账号"
         if self.pool_id and self.tier:
             conflicting_policies = PoolAccountPolicy.objects.filter(pool_id=self.pool_id).exclude(
                 pk=self.pk
